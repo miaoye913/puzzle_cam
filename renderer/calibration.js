@@ -38,6 +38,9 @@ const calibration = {
   // 板子是竖着放的话改成 210 × 297 就行
   boardW: 297,
   boardH: 210,
+  // 一键校准的两个参数：Y 开到哪儿（挪出画面），以及等多久再抓帧
+  calibYPulse: 32000,
+  calibSettleMs: 4000,
 }
 
 /** 机器此刻在哪（脉冲）。没连机器就是 null */

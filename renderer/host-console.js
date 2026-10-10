@@ -41,6 +41,8 @@ const hostEl = {
   calBW: document.getElementById('cal-bw'),
   calBH: document.getElementById('cal-bh'),
   calReset: document.getElementById('cal-reset'),
+  calCalibY: document.getElementById('cal-caliby'),
+  calCalibWait: document.getElementById('cal-calibwait'),
   calReadout: document.getElementById('cal-readout'),
   calMove: document.getElementById('cal-move'),
   rotMain: document.getElementById('rot-main'),
@@ -189,10 +191,11 @@ const ACTION_STEP_MS = 700
 const SERVO_DOWN = 1
 const SERVO_UP = 0
 
-// 一键校准：把 Y 开到这个脉冲，停一下再识别
-const CALIBRATE_Y_PULSE = 32000
-// 等机器真的走过去再识别——ACK 只代表命令收到，走一半就抓帧会识别到糊的
-const CALIBRATE_SETTLE_MS = 1500
+// 一键校准的两个参数放在设置页里可调（calibration.calibYPulse / calibSettleMs），
+// 因为机器快慢不一样，得能当场调。
+//
+// 那个等待时间**宁可给长一点**：ACK 只代表命令收到、不代表走到了，
+// 机器还在半路上就抓帧的话，识别到的是糊的，标定白做。实测反馈也是「经常没动到就开始校准了」。
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 let actionRunning = false        // 动作进行中：挡住重复触发
@@ -211,8 +214,12 @@ function updateActuatorButtons() {
   for (const button of [hostEl.pickBtn, hostEl.placeBtn, hostEl.calibBtn]) {
     button.disabled = !hostConnected || actionRunning
   }
-  // 自动拼图：跑起来之后**仍然可点**——那时候它是「停止」
-  hostEl.autoBtn.textContent = autoRunning ? '停止' : '自动拼图'
+  // 自动拼图：跑起来之后**仍然可点**——那时候它是「停止」。
+  // 平时显示「拼第几块」，一次只走一块，方便一步一步调。
+  if (autoRunning) hostEl.autoBtn.textContent = '停止'
+  else if (!autoTotal) hostEl.autoBtn.textContent = '自动拼图'
+  else if (autoIndex >= autoTotal) hostEl.autoBtn.textContent = `已拼完 ${autoTotal} 块`
+  else hostEl.autoBtn.textContent = `拼第 ${autoIndex + 1}/${autoTotal} 块`
   hostEl.autoBtn.classList.toggle('stop', autoRunning)
   hostEl.autoBtn.classList.toggle('primary', !autoRunning)
   hostEl.autoBtn.disabled = !hostConnected && !autoRunning
@@ -281,6 +288,11 @@ const AUTO_SETTLE_MS = 2500         // 位置报不回来时，退化成固定�
 
 let autoRunning = false
 let autoAbort = false
+// 现在一次只拼一块，所以要有进度。换了一次识别结果就把进度清零——
+// 碎片已经动过了，旧的路径作废。
+let autoIndex = 0
+let autoTotal = 0
+let autoResult = null
 // null = 还没试出来；false = 试过了发现位置对不上，后面就别白等了
 let autoPollWorks = null
 
@@ -337,44 +349,57 @@ async function autoAssemble() {
   const paths = planPaths(lastResult, ctx.map)
   if (!paths.length) { hostLog('自动拼图：没有可搬运的路径'); return }
 
+  if (autoIndex >= paths.length) {
+    hostLog(`自动拼图：${paths.length} 块都拼过了。要重来先重新识别一次（进度会跟着重置）`)
+    return
+  }
+
+  // **一次只拼一块**：点一下走一块，方便对着日志和画面一步一步调。点完进度自己往前走。
+  const path = paths[autoIndex]
+  const step = autoIndex + 1
   autoRunning = true
   autoAbort = false
   autoPollWorks = null
   updateActuatorButtons()
-  hostLog(`自动拼图：共 ${paths.length} 块，开始`)
+  hostLog(`—— 第 ${step}/${paths.length} 块（#${path.id}）——`)
   try {
-    for (let i = 0; i < paths.length; i++) {
-      const path = paths[i]
-      if (autoAbort) { hostLog(`自动拼图：在第 ${i + 1} 块之前停下`); break }
-      hostLog(`—— 第 ${i + 1}/${paths.length} 块（#${path.id}）——`)
+    // 1. 旋转归零：每轮都从同一个姿态开始，转角才有确定含义
+    await hostCommand({ cmd: 'set', rot: 0 })
+    hostEl.rotMain.value = '0'
 
-      // 1. 旋转归零：每轮都从同一个姿态开始，转角才有确定含义
-      await hostCommand({ cmd: 'set', rot: 0 })
-      hostEl.rotMain.value = '0'
-
-      // 2. 去碎片现在的位置，3. 吸起来
-      const [fx, fy] = boardToPulses(path.from[0], path.from[1], rect[0], rect[1])
-      const from = [Math.round(fx), Math.round(fy)]
-      hostLog(`   去取 #${path.id}：脉冲(${from[0]}, ${from[1]})`)
-      if (!(await moveAndWait(from[0], from[1], '去取'))) { hostLog('   移动没发出去，停'); break }
-      if (autoAbort) break
+    // 2. 去碎片现在的位置，3. 吸起来
+    const [fx, fy] = boardToPulses(path.from[0], path.from[1], rect[0], rect[1])
+    const from = [Math.round(fx), Math.round(fy)]
+    hostLog(`   去取 #${path.id}：脉冲(${from[0]}, ${from[1]})`)
+    if (await moveAndWait(from[0], from[1], '去取') && !autoAbort) {
       await runPickPlace('pick')
+    }
 
-      // 4. 转到目标姿态（拾取时工具在 0°，所以直接转到 dRot 就是目标姿态）
+    // 4. 转到目标姿态（拾取时工具在 0°，所以直接转到 dRot 就是目标姿态）
+    if (!autoAbort) {
       const rot = Math.round(path.dRot)
       hostLog(`   旋转 → ${rot}°`)
       await hostCommand({ cmd: 'set', rot })
       hostEl.rotMain.value = String(rot)
+    }
 
-      // 5. 去目标位置，6. 放下（放的过程里会把旋转归零）
+    // 5. 去目标位置，6. 放下（放的过程里会把旋转归零）
+    if (!autoAbort) {
       const [tx, ty] = boardToPulses(path.to[0], path.to[1], rect[0], rect[1])
       const to = [Math.round(tx), Math.round(ty)]
       hostLog(`   去放 #${path.id}：脉冲(${to[0]}, ${to[1]})`)
-      if (!(await moveAndWait(to[0], to[1], '去放'))) { hostLog('   移动没发出去，停'); break }
-      if (autoAbort) break
-      await runPickPlace('place')
+      if (await moveAndWait(to[0], to[1], '去放') && !autoAbort) {
+        await runPickPlace('place')
+      }
     }
-    hostLog(autoAbort ? '自动拼图：已停止' : '自动拼图：完成')
+
+    if (autoAbort) {
+      hostLog(`自动拼图：已停止（第 ${step} 块没走完，下次还是从这一块开始）`)
+    } else {
+      autoIndex = step          // 只有整块走完才往前走
+      hostLog(`自动拼图：第 ${step}/${paths.length} 块完成` +
+              (autoIndex < paths.length ? `，再点一下拼第 ${autoIndex + 1} 块` : '，全部拼完'))
+    }
   } finally {
     autoRunning = false
     autoAbort = false
@@ -402,10 +427,17 @@ function updatePathTable(result) {
     body.append(tr)
   }
   const ctx = result?.board?.found ? currentAssemblyMap(result) : null
-  if (!ctx) { reset('还没识别'); return }
+  if (!ctx) { autoTotal = 0; reset('还没识别'); return }
   const rect = result.board.rect_size
   const paths = planPaths(result, ctx.map)
-  if (!paths.length) { reset('没拼出矩形'); return }
+  if (!paths.length) { autoTotal = 0; reset('没拼出矩形'); return }
+
+  // 换了一份识别结果就把自动拼图的进度清零：碎片已经被搬过，旧路径作废了
+  if (result !== autoResult) {
+    autoResult = result
+    autoIndex = 0
+  }
+  autoTotal = paths.length
 
   body.replaceChildren()
   for (const path of paths) {
@@ -428,21 +460,39 @@ function updatePathTable(result) {
   }
 }
 
-/** 一键校准：Y 开到标定位置 → 停一下 → 识别一次 */
+/**
+ * 一键校准：Y 开到标定位置（挪出画面）→ 等它走完 → 识别一次 → 再移到板子中央。
+ *
+ * 最后那步移到中央是为了方便接着动手——校准完工具停在画面外，什么也够不着。
+ */
 async function oneClickCalibrate() {
   if (actionRunning || !hostConnected) return
   actionRunning = true
   updateActuatorButtons()
+  const yTarget = Math.round(Number(calibration.calibYPulse) || 0)
+  const waitMs = Math.max(0, Math.round(Number(calibration.calibSettleMs) || 0))
   try {
-    hostLog(`一键校准：Y → 脉冲 ${CALIBRATE_Y_PULSE}`)
-    const reply = await hostCommand({ cmd: 'set', y: CALIBRATE_Y_PULSE })
+    hostLog(`一键校准：Y → 脉冲 ${yTarget}，等 ${waitMs}ms`)
+    const reply = await hostCommand({ cmd: 'set', y: yTarget })
     if (!reply?.ok) {
       hostLog('一键校准中断：Y 没发出去')
       return
     }
-    await sleep(CALIBRATE_SETTLE_MS)
+    // 等机器真的走过去。宁可多等——半路上抓帧的话识别到的是糊的，白做
+    await sleep(waitMs)
     hostLog('一键校准：开始识别')
     await recognizeOnce()
+
+    // 停到板子中央，方便下一步动手
+    const rect = lastResult?.board?.rect_size
+    if (rect) {
+      const [cx, cy] = boardToPulses(rect[0] / 2, rect[1] / 2, rect[0], rect[1])
+      const centre = [Math.round(cx), Math.round(cy)]
+      hostLog(`一键校准：移到中央 脉冲(${centre[0]}, ${centre[1]})`)
+      await hostCommand({ cmd: 'set', x: centre[0], y: centre[1] })
+    } else {
+      hostLog('一键校准：没识别出板面，跳过「移到中央」')
+    }
   } finally {
     actionRunning = false
     updateActuatorButtons()
@@ -470,6 +520,7 @@ async function toggleActuator(which) {
 const CAL_DEFAULTS = {
   xMin: 500, xMax: 2200, yMin: 2200, yMax: 25100,
   invertX: false, invertY: false, boardW: 297, boardH: 210,
+  calibYPulse: 32000, calibSettleMs: 4000,
 }
 
 function fillCalibrationForm() {
@@ -481,6 +532,8 @@ function fillCalibrationForm() {
   hostEl.calInvY.checked = calibration.invertY
   hostEl.calBW.value = calibration.boardW
   hostEl.calBH.value = calibration.boardH
+  hostEl.calCalibY.value = calibration.calibYPulse
+  hostEl.calCalibWait.value = calibration.calibSettleMs
 }
 
 function applyCalibrationForm() {
@@ -496,6 +549,8 @@ function applyCalibrationForm() {
   calibration.invertY = hostEl.calInvY.checked
   calibration.boardW = num(hostEl.calBW, calibration.boardW)
   calibration.boardH = num(hostEl.calBH, calibration.boardH)
+  calibration.calibYPulse = num(hostEl.calCalibY, calibration.calibYPulse)
+  calibration.calibSettleMs = num(hostEl.calCalibWait, calibration.calibSettleMs)
   saveCalibration()
   renderView()          // 网格刻度和准星都跟着范围变，立刻重画
   updateCalReadout()
@@ -608,7 +663,7 @@ function wireHostConsole() {
 
   // 坐标映射那几个框：改完立刻存下来并重画，不用点「应用」
   for (const input of [hostEl.calXMin, hostEl.calXMax, hostEl.calYMin, hostEl.calYMax,
-    hostEl.calBW, hostEl.calBH]) {
+    hostEl.calBW, hostEl.calBH, hostEl.calCalibY, hostEl.calCalibWait]) {
     input.addEventListener('change', applyCalibrationForm)
   }
   hostEl.calInvX.addEventListener('change', applyCalibrationForm)

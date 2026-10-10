@@ -141,6 +141,12 @@
               <label class="field checkbox"><input type="checkbox" id="cal-invy" /> Y 反向</label>
               <button id="cal-reset" class="ghost">复位</button>
             </div>
+            <!-- 一键校准那两个参数。等待时间要给够——机器还没走到就抓帧的话，
+                 识别到的是半路上的画面，标定就白做了 -->
+            <div class="host-row">
+              <label class="host-num">校准位移 Y <input id="cal-caliby" class="cal-num" /></label>
+              <label class="host-num">等待 <input id="cal-calibwait" class="cal-num" /> ms</label>
+            </div>
             <p class="muted" id="cal-readout">机器位置：未连接</p>
           </section>
 
