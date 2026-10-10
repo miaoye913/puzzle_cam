@@ -14,6 +14,18 @@
  */
 const CALIBRATION_KEY = 'puzzle_cam.calibration'
 
+/**
+ * 机器两个轴和板子两个方向是**交叉**的：机器的 X 电机走的是板子的**纵向**，
+ * 机器的 Y 电机走**横向**（装的时候是这么接的，实测反馈：不交叉准星就横竖颠倒）。
+ *
+ * 所以下面归一化出来的两个比例，要分别当作「纵向比例」和「横向比例」来用。
+ * 换上不交叉的机器就把这里改成 false。
+ *
+ * 注意：X/Y 两个「反向」勾选说的仍然是**机器的那两个轴**——交叉之后，
+ * 「X 反向」翻的就是板子的纵向，这不是 bug，是同一个轴。
+ */
+const AXES_CROSSED = true
+
 const calibration = {
   // 脉冲范围：整块板子对应的电机行程
   xMin: 500,
@@ -59,17 +71,21 @@ const _clamp01 = (v) => Math.min(1, Math.max(0, v))
 
 /** 脉冲 → 板面毫米。结果**夹在板内**：脉冲跑出标定范围时准星画到画布外面就看不见了 */
 function pulsesToMm(px, py) {
+  // 先各自归一化到「机器 X 的比例」「机器 Y 的比例」
   let nx = _clamp01(_norm(px, calibration.xMin, calibration.xMax))
   let ny = _clamp01(_norm(py, calibration.yMin, calibration.yMax))
   if (calibration.invertX) nx = 1 - nx
   if (calibration.invertY) ny = 1 - ny
-  return [nx * calibration.boardW, ny * calibration.boardH]
+  // 再按「机器轴 ↔ 板子方向」的对应关系组装（见 AXES_CROSSED）
+  const [hx, vy] = AXES_CROSSED ? [ny, nx] : [nx, ny]
+  return [hx * calibration.boardW, vy * calibration.boardH]
 }
 
 /** 板面毫米 → 脉冲（反函数）。把碎片的目标点翻成机器要走的脉冲，用的就是它 */
 function mmToPulses(xmm, ymm) {
-  let nx = calibration.boardW ? xmm / calibration.boardW : 0
-  let ny = calibration.boardH ? ymm / calibration.boardH : 0
+  const hx = calibration.boardW ? xmm / calibration.boardW : 0
+  const vy = calibration.boardH ? ymm / calibration.boardH : 0
+  let [nx, ny] = AXES_CROSSED ? [vy, hx] : [hx, vy]   // 拆回机器那两个轴
   if (calibration.invertX) nx = 1 - nx
   if (calibration.invertY) ny = 1 - ny
   return [

@@ -136,13 +136,17 @@
 
         <!-- 坐标映射：把机器的脉冲范围对到板面上，准星才能画出来 -->
         <section class="host-group">
+          <!-- 两个轴是交叉接的：X 电机的行程走板子纵向、Y 电机走横向。
+               标签里直接写出来，免得对着「X 反向怎么动了竖的」发懵 -->
           <div class="host-row">
-            <label class="host-num">X 脉冲 <input id="cal-xmin" class="cal-num" /></label>
+            <label class="host-num">X 脉冲 <span class="host-tilde">走纵向</span>
+              <input id="cal-xmin" class="cal-num" /></label>
             <span class="host-tilde">~</span>
             <input id="cal-xmax" class="cal-num" />
           </div>
           <div class="host-row">
-            <label class="host-num">Y 脉冲 <input id="cal-ymin" class="cal-num" /></label>
+            <label class="host-num">Y 脉冲 <span class="host-tilde">走横向</span>
+              <input id="cal-ymin" class="cal-num" /></label>
             <span class="host-tilde">~</span>
             <input id="cal-ymax" class="cal-num" />
           </div>
