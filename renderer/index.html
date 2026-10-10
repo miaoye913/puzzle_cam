@@ -27,6 +27,7 @@
 
       <button id="snapshot" disabled>拍照保存</button>
       <button id="rescan">重新扫描</button>
+      <button id="host-toggle">串口控制台</button>
     </header>
 
     <header class="toolbar vision-bar">
@@ -83,6 +84,67 @@
         <summary>侧车日志</summary>
         <pre id="vision-log"></pre>
       </details>
+
+      <!-- 串口控制台：操控 STM32 拼图机。放右边，不挡左边拼图区、也不和底部中间的日志打架 -->
+      <aside id="host-panel" class="host-panel hidden">
+        <header class="host-head">
+          <span>串口控制台 · 拼图机</span>
+          <button id="host-close" class="ghost" title="收起">×</button>
+        </header>
+
+        <section class="host-group">
+          <div class="host-row">
+            <!-- 用 input + datalist 而不是 select：既能从列表里挑，也能手打
+                 tcp://127.0.0.1:5000 连仿真设备 -->
+            <input id="host-port" list="host-port-list" placeholder="COM3 / /dev/ttyUSB0" />
+            <datalist id="host-port-list"></datalist>
+            <button id="host-refresh" class="ghost">刷新</button>
+          </div>
+          <div class="host-row">
+            <input id="host-baud" value="115200" title="波特率" />
+            <button id="host-connect">连接</button>
+          </div>
+        </section>
+
+        <section class="host-group">
+          <div class="host-row">
+            <button id="host-ping">PING</button>
+            <button id="host-reinit">重新初始化</button>
+            <button id="host-getall">查询全部</button>
+          </div>
+          <label class="field checkbox">
+            <input type="checkbox" id="host-poll" />
+            自动轮询状态
+          </label>
+        </section>
+
+        <section class="host-group">
+          <div class="host-row">
+            <label class="host-num">X <input id="host-x" value="0" /></label>
+            <label class="host-num">Y <input id="host-y" value="0" /></label>
+          </div>
+          <div class="host-row">
+            <label class="host-num">旋转° <input id="host-rot" value="0" /></label>
+            <label class="field checkbox"><input type="checkbox" id="host-servo" /> 舵机</label>
+            <label class="field checkbox"><input type="checkbox" id="host-em" /> 电磁铁</label>
+          </div>
+          <div class="host-row">
+            <button id="host-send" class="primary">下发</button>
+            <button id="host-echo">回环测试</button>
+          </div>
+        </section>
+
+        <section class="host-group host-state">
+          <div><span>X</span><b id="host-sx">—</b></div>
+          <div><span>Y</span><b id="host-sy">—</b></div>
+          <div><span>旋转</span><b id="host-sr">—</b></div>
+          <div><span>找零中</span><b id="host-sh">—</b></div>
+          <div><span>舵机</span><b id="host-ss">—</b></div>
+          <div><span>电磁铁</span><b id="host-se">—</b></div>
+        </section>
+
+        <pre id="host-log" class="host-log"></pre>
+      </aside>
     </main>
 
     <footer class="statusbar">
@@ -92,5 +154,6 @@
     </footer>
 
     <script src="renderer.js"></script>
+    <script src="host-console.js"></script>
   </body>
 </html>

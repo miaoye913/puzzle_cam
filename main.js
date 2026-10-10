@@ -1,9 +1,11 @@
 const { app, BrowserWindow, session, shell } = require('electron')
 const path = require('node:path')
 const { VisionClient } = require('./lib/vision-client')
+const { HostClient } = require('./lib/host-client')
 const { registerIpcHandlers } = require('./lib/ipc')
 
 const vision = new VisionClient()
+const host = new HostClient()
 
 let mainWindow = null
 
@@ -40,7 +42,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-  registerIpcHandlers({ vision, getWindow: () => mainWindow })
+  registerIpcHandlers({ vision, host, getWindow: () => mainWindow })
 
   // 摄像头需要媒体权限；本应用内容全部来自本地文件，直接放行
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
@@ -56,6 +58,10 @@ app.whenReady().then(() => {
     mainWindow?.webContents.send('vision:log', line)
   })
 
+  // 串口桥接：日志打到终端。转发给界面的那部分在 registerIpcHandlers 里，
+  // 测试注册同一份接线时才能一并验到
+  host.on('log', (line) => console.log('[host]', line))
+
   createWindow()
 
   app.on('activate', () => {
@@ -67,4 +73,7 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => vision.stop())
+app.on('before-quit', () => {
+  vision.stop()
+  host.stop()
+})

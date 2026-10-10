@@ -11,6 +11,7 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const { writeSnapshot } = require('../lib/snapshot')
 const { VisionClient } = require('../lib/vision-client')
+const { HostClient } = require('../lib/host-client')
 const { registerIpcHandlers } = require('../lib/ipc')
 
 const ROOT = path.join(__dirname, '..')
@@ -24,7 +25,10 @@ const warnings = []
 async function checkVision(win) {
   const vision = new VisionClient()
   vision.on('log', (line) => console.log(`  [vision] ${line}`))
-  registerIpcHandlers({ vision, getWindow: () => win })
+  const host = new HostClient()
+  host.on('log', (line) => console.log(`  [host] ${line}`))
+  // 两个客户端一次注册完——ipcMain.handle 同一个通道注册第二次会直接抛错
+  registerIpcHandlers({ vision, host, getWindow: () => win })
 
   const started = await win.webContents.executeJavaScript('window.camAPI.vision.start()')
   if (!started) {
@@ -102,6 +106,54 @@ async function checkVision(win) {
   }
 
   await win.webContents.executeJavaScript('window.camAPI.vision.stop()')
+  await checkHostConsole(win)
+}
+
+/**
+ * 串口控制台：验桥接能起来、能列串口。
+ *
+ * 收发那一段要有仿真设备才验得动（`python puzzle_host/demo_device.py --port 5000`），
+ * 没有就记 WARN 跳过——环境没准备好不该报成代码坏了。
+ */
+async function checkHostConsole(win) {
+  const started = await win.webContents.executeJavaScript('window.camAPI.host.start()')
+  if (!started) {
+    warnings.push('串口桥接起不来（没找到能导入 puzzle_host 的 Python）')
+    return
+  }
+
+  const ports = await win.webContents.executeJavaScript(`(async () => {
+    const r = await window.camAPI.host.command({ cmd: 'ports' })
+    return { ok: r.ok, error: r.error, count: r.reply?.ports?.length ?? 0, pyserial: r.reply?.havePyserial }
+  })()`)
+  if (!ports.ok) {
+    problems.push(`串口列表拿不到：${ports.error}`)
+  } else {
+    console.log(`  host bridge : OK · ${ports.count} 个串口 · pyserial ${ports.pyserial ? '可用' : '不可用'}`)
+  }
+
+  const linked = await win.webContents.executeJavaScript(`(async () => {
+    const r = await window.camAPI.host.command({ cmd: 'open', target: 'tcp://127.0.0.1:5000' })
+    if (!r.reply?.ok) return { ok: false, error: r.reply?.error }
+    const seen = new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), 3000)
+      window.camAPI.host.onEvent((m) => { if (m.event === 'status') { clearTimeout(timer); resolve(true) } })
+    })
+    await window.camAPI.host.command({ cmd: 'set', x: 777 })
+    await window.camAPI.host.command({ cmd: 'get_all' })
+    const all = await window.camAPI.host.command({ cmd: 'get_all' })
+    const got = await seen
+    await window.camAPI.host.command({ cmd: 'close' })
+    return { ok: true, sawEvent: got, posX: all.reply?.status?.posX }
+  })()`)
+
+  if (!linked.ok) {
+    warnings.push(`没有 tcp://127.0.0.1:5000 的仿真设备，串口收发只验到「列串口」（${linked.error}）`)
+  } else {
+    if (linked.posX !== 777) problems.push(`仿真设备回的 X 是 ${linked.posX}，应为 777`)
+    if (!linked.sawEvent) problems.push('status 事件没转发到渲染进程')
+    console.log(`  host link   : OK · 下发并读回 X=${linked.posX} · status 事件${linked.sawEvent ? '已收到' : '没收到'}`)
+  }
 }
 
 /** 让渲染进程真画一张 canvas，走完整的 dataURL → 解码 → 落盘链路 */

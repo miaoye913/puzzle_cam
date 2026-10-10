@@ -33,25 +33,81 @@ npm run smoke
 | 左右分区 | 板子中间那条线当分界线：左「拼图区」显示**拼好的矩形**，右「识别区」显示**识别到的碎片** |
 | 叠加层 | 碎片轮廓 + 编号 + 板上的线条，画在矫正后的板面上 |
 | 浮动小窗 | 左下是拼好的矩形，右下是原始摄像头画面（对位置和光照用） |
+| 串口控制台 | 右上角可折叠面板：操控 STM32 拼图机（X/Y/旋转/舵机/电磁铁、PING、找零、实时状态），见下文 |
 | 状态栏 | 显示当前分辨率与**摄像头真实出帧率** |
 
 ## 结构
 
 ```
 main.js                  主进程：窗口、媒体权限放行、IPC 注册
-preload.js               contextBridge 暴露 window.camAPI.{saveSnapshot, vision}
+preload.js               contextBridge 暴露 window.camAPI.{saveSnapshot, vision, host}
 lib/ipc.js               全部 IPC 通道，冒烟测试复用同一份接线
 lib/snapshot.js          dataURL → PNG 落盘
 lib/vision-client.js     Python 侧车进程客户端（起进程、走协议、超时、生命周期）
+lib/host-client.js       串口桥接进程客户端（NDJSON 收发）
 renderer/index.html      界面骨架（含 CSP）
 renderer/style.css       样式
 renderer/renderer.js     取流、设备枚举、帧率统计、拍照、抽帧、叠加层绘制
+renderer/host-console.js 串口控制台面板（单独一个文件，免得 renderer.js 越堆越大）
 vision/main.py           侧车入口：stdio 循环 + 独立调试入口
 vision/pipeline.py       **算法本体**，改这里
 vision/requirements.txt  opencv-python、numpy
+host/bridge.py           串口桥接：把 puzzle_host 那套翻译成 JSON 行，我们自己的代码
+puzzle_host/             **vendored**：STM32 拼图机上位机（MIT，见下方「串口控制台」）
 scripts/start.js         Electron 启动器，见下方「踩坑」
 scripts/smoke.js         冒烟测试
 ```
+
+## 串口控制台：操控 STM32 拼图机
+
+右上角「串口控制台」按钮点开一个可折叠面板：扫串口、连接、下发 X/Y/旋转/舵机/电磁铁、
+PING、触发找零（重新初始化）、周期查询实时状态，右边是收发日志。
+
+### 为什么又开了一个 Python 进程
+
+渲染进程碰不到串口；主进程要自己开串口就得引原生模块（`serialport` 三个平台各自要编译）。
+所以和视觉那套一样，**主进程 spawn 一个 Python**（`host/bridge.py`），两边说 JSON：
+
+```
+stdin   一行一个 JSON   = 命令（open / set / ping / get_all / poll ...）
+stdout  一行一个 JSON   = 事件（status / conn / log / echo）和命令回复
+stderr  任意文本        = 日志
+```
+
+它自己不实现协议，而是直接用 **`puzzle_host/`**（下面那套）里的 `ProtoClient` 和 `link`。
+那套代码有 76 项测试覆盖，再写一遍纯属冒险。
+
+### `puzzle_host/` 是 vendored 进来的第三方代码
+
+来自同一个作者的另一个项目：**https://github.com/miaoye913/stm32-puzzle-host**，
+**MIT 协议**（`puzzle_host/LICENSE` 是原件，别删）。它是一个 PC 端上位机，
+通过自定义二进制帧协议（`AA 55 CMD LEN DATA... XOR 0D`）经串口操控 STM32F103 拼图机。
+连它的 `vendor/`（自带 pyserial 3.5）一起搬进来了，所以**不用额外装 pyserial**。
+
+`puzzle_host/` 里的文件**保持原样**，我们的代码（`host/bridge.py`）不混进去——
+以后要跟上游同步时省事。
+
+### 不接硬件也能全流程验证
+
+它自带一个仿真 STM32：
+
+```bash
+python puzzle_host/demo_device.py --port 5000     # 打印「仿真 STM32 已监听 tcp://127.0.0.1:5000」
+```
+
+然后在控制台面板的串口框里手填 `tcp://127.0.0.1:5000`（那个框是可输入的下拉，不是纯选择框），
+点连接——整条链路（界面 → IPC → 桥接 → 帧协议 → 设备）就跑通了，不需要任何硬件。
+
+也可以直接跑它自己的测试：`cd puzzle_host && python -m unittest discover -s tests -t .`（76 项）。
+
+### 一个容易误会的点
+
+设备回的 **ACK 只代表「命令排队了」，不代表动作做完**。所以面板上的实时状态是靠周期
+GET ALL 刷出来的（「自动轮询状态」那个勾），`docs` 里也写明了这点。别拿 ACK 当完成。
+
+> **还没做的**：`posX/posY` 是**脉冲逻辑坐标**（上电找零后从 0 开始、只增不减），
+> 整套东西里**没有任何「画面像素 ↔ 机器脉冲」的换算**。所以「识别完自动把碎片摆好」
+> 现在做不了——缺的是那套标定，不是代码。控制台只是把手动操作搬进了界面。
 
 ## OpenCV 视觉分析
 
@@ -315,6 +371,15 @@ python vision/main.py --source camera:0                        # 实时开窗看
   ```bash
   sudo usermod -aG video $USER    # 重新登录后生效
   ```
+- **Linux/Pi 访问串口**（串口控制台要用）：要加进 `dialout` 组（有些发行版是 `uucp`），
+  否则报 `Permission denied`：
+  ```bash
+  sudo usermod -aG dialout $USER  # 重新登录后生效；用 groups 确认
+  ```
+  端口名：USB 转串口（CH340/CP2102/FT232）是 `/dev/ttyUSB0`，CDC/ACM 类（ST-Link 等）
+  是 `/dev/ttyACM0`。插拔后编号会变，**建议用 `/dev/serial/by-id/...` 这个稳定别名**
+  （面板里的串口下拉会自动列出来）。另外 `ModemManager` 有时会占住串口，
+  报 `Device or resource busy` 时 `sudo systemctl stop ModemManager`。
 - Electron 官方有 linux-arm64 构建，Pi 4/5 的 64 位系统直接跑得起来。
   **注意：树莓派上没实测过**，上面这些都是同一套代码路径的推断。
 

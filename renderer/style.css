@@ -215,6 +215,131 @@ video.hidden {
   background: #16191f;
 }
 
+/* ── 串口控制台 ────────────────────────────────────────────── */
+.host-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  box-shadow: -8px 0 24px rgb(0 0 0 / 45%);
+  overflow: hidden;
+  z-index: 5;
+}
+
+.host-panel.hidden {
+  display: none;
+}
+
+.host-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.host-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #16191f;
+}
+
+.host-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.host-row > select,
+.host-row > input {
+  flex: 1;
+  min-width: 0;
+}
+
+.host-num {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.host-num input {
+  width: 100%;
+  min-width: 0;
+}
+
+.host-panel input[type='text'],
+.host-panel input:not([type]),
+.host-panel select {
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #23272f;
+  color: var(--text);
+  font: inherit;
+}
+
+.host-state {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 10px;
+}
+
+.host-state > div {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.host-state span {
+  color: var(--muted);
+}
+
+.host-state b {
+  font-variant-numeric: tabular-nums;
+}
+
+.host-log {
+  flex: 1;
+  min-height: 60px;
+  margin: 0;
+  padding: 6px 8px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0f1216;
+  color: #b9c2cf;
+  font: 11px/1.45 Consolas, "Cascadia Mono", monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+
+button.ghost {
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+button.ghost:hover {
+  color: var(--text);
+}
+
 .muted {
   color: var(--muted);
   font-size: 12px;

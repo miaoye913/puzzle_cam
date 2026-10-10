@@ -13,4 +13,13 @@ contextBridge.exposeInMainWorld('camAPI', {
     analyze: (jpegBytes) => ipcRenderer.invoke('vision:analyze', jpegBytes),
     onLog: (handler) => ipcRenderer.on('vision:log', (_event, line) => handler(line)),
   },
+
+  // STM32 拼图机的串口控制台。command 走一条 JSON 命令，事件（状态/收发/掉线）走 onEvent
+  host: {
+    start: () => ipcRenderer.invoke('host:start'),
+    stop: () => ipcRenderer.invoke('host:stop'),
+    command: (payload) => ipcRenderer.invoke('host:command', payload),
+    onEvent: (handler) => ipcRenderer.on('host:event', (_event, message) => handler(message)),
+    onLog: (handler) => ipcRenderer.on('host:log', (_event, line) => handler(line)),
+  },
 })
