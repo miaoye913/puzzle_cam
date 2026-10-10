@@ -287,12 +287,20 @@ def _beam_solve(polys, beam_width=BEAM_WIDTH, deadline=None):
         placed = [_apply(polys[i], t) for i, t in transforms.items()]
         score, metrics = _final_score(placed, [areas[i] for i in transforms])
         if best is None or score < best[0]:
-            best = (score, metrics, ids, [np.asarray(x, np.float64) for x in placed])
+            # 连每块用的旋转矩阵一起带回去：块最终要转多少度，就是从这个矩阵算出来的，
+            # 不用（也不能）到前端再拿「第0条边的方向」去反推
+            best = (score, metrics, ids, [np.asarray(x, np.float64) for x in placed],
+                    [np.asarray(transforms[i][0], np.float64) for i in ids])
     return best
 
 
 def _normalize(placements):
-    """摆正并平移到原点，前端拿到就能直接按比例画。"""
+    """
+    摆正并平移到原点，前端拿到就能直接按比例画。
+
+    同时把这里施加的**全局旋转**返回出去：每块最终相对它自己原始形状转了多少度，
+    要靠它和「求解时那一块自己的旋转」复合出来（见 solve）。
+    """
     allp = np.vstack(placements)
     (_c, (_w, _h), ang) = cv2.minAreaRect(allp.astype(np.float32))
     rad = np.radians(ang)
@@ -302,7 +310,7 @@ def _normalize(placements):
     mn = allp.min(axis=0)
     out = [p - mn for p in out]
     allp = np.vstack(out)
-    return out, [float(allp[:, 0].max()), float(allp[:, 1].max())]
+    return out, [float(allp[:, 0].max()), float(allp[:, 1].max())], rot
 
 
 def _scaled(polys, s):
@@ -375,8 +383,8 @@ def solve(pieces, aspect=None, shrink=None, beam_width=None, time_budget=None, n
                 got = _beam_solve(_scaled(shrunk, s), beam_width, deadline)
                 if got is None:
                     continue
-                score, metrics, ids, placed = got
-                placements, size = _normalize(placed)
+                score, metrics, ids, placed, rots = got
+                placements, size, norm_rot = _normalize(placed)
                 cand = {
                     'size': [round(size[0], 1), round(size[1], 1)],
                     'aspect': round(float(s), 3),
@@ -384,9 +392,15 @@ def solve(pieces, aspect=None, shrink=None, beam_width=None, time_budget=None, n
                     'score': round(float(score), 4),
                     'fill': round(float(metrics.get('fill', 0.0)), 4),
                     'outer_vertices': int(metrics.get('outer_vertices', 0)),
-                    'placements': [{'index': int(ids[i]),
-                                    'polygon': [[round(float(x), 1), round(float(y), 1)] for x, y in p]}
-                                   for i, p in enumerate(placements)],
+                    'placements': [{
+                        'index': int(ids[i]),
+                        'polygon': [[round(float(x), 1), round(float(y), 1)] for x, y in p],
+                        # 这块相对它自己原始形状一共要转多少度（求解时的旋转 ∘ 摆正时的旋转）。
+                        # 用矩阵复合算，而不是在前端拿两条边的方向相减——两边的顶点绕向
+                        # 可能相反（求解前统一转过），那时「第0条边」根本不是同一条边。
+                        'rot_deg': round(float(np.degrees(np.arctan2(
+                            (norm_rot @ rots[i])[1, 0], (norm_rot @ rots[i])[0, 0]))), 1),
+                    } for i, p in enumerate(placements)],
                 }
                 if node_log is not None:
                     node_log.append(

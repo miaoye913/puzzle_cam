@@ -410,18 +410,6 @@ function polyCentroid(poly) {
   return poly.reduce((acc, p) => [acc[0] + p[0] / poly.length, acc[1] + p[1] / poly.length], [0, 0])
 }
 
-/** 第 0 条边的方向角，用来算「这块要转多少度」 */
-function polyAngle(poly) {
-  return Math.atan2(poly[1][1] - poly[0][1], poly[1][0] - poly[0][0])
-}
-
-function normDeg(deg) {
-  let d = deg % 360
-  if (d > 180) d -= 360
-  if (d < -180) d += 360
-  return d
-}
-
 /**
  * 路径规划：每块碎片从「现在在哪」到「拼好后该在哪」。
  *
@@ -439,9 +427,12 @@ function planPaths(result, assemblyMap) {
     const targetBoard = item.polygon.map(([x, y]) => assemblyMap.toBoard(x, y))
     const from = polyCentroid(piece.polygon_warp)
     const to = polyCentroid(targetBoard)
-    const dRot = normDeg(
-      (polyAngle(targetBoard) - polyAngle(piece.polygon_warp)) * 180 / Math.PI,
-    )
+    // 转角**直接用侧车给的**——它是从求解时实际施加的那个旋转矩阵算出来的，一定对。
+    //
+    // 曾经在这里拿「碎片第 0 条边」和「目标第 0 条边」的方向相减，那是错的：
+    // 侧车拼接前会把碎块统一转成同一个绕向，而识别出来的轮廓是另一个绕向，
+    // 两边的「第 0 条边」根本不是同一条边——算出来能差上百度（实测 4 块里错了 3 块）。
+    const dRot = item.rot_deg ?? 0
     paths.push({
       id: item.id,
       from,

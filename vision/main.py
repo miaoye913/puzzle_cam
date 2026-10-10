@@ -482,6 +482,25 @@ def run_selftest():
                 problems.append(
                     f"#{item['id']} 拼好后的形状和它自己那块对不上（编号错位）："
                     f"{[round(a, 1) for a in want]} vs {[round(a, 1) for a in got]}")
+
+            # rot_deg 必须是真的能把这块转过去的角：按它转完，应当落在目标多边形上。
+            #
+            # 这条防的是「角度算错了但看着像那么回事」——曾经在前端拿「碎片第 0 条边」和
+            # 「目标第 0 条边」的方向相减去算角度，而两边绕向相反（拼接前统一转过），
+            # 「第 0 条边」根本不是同一条边，4 块里错了 3 块，误差 18~59 像素。
+            # rot_deg 现在由求解器按**实际施加的旋转矩阵**给出，这条把它钉住。
+            src = np.asarray(piece['polygon_warp'], float)
+            target = np.asarray(item['polygon'], float)
+            if len(src) == len(target) and 'rot_deg' in item:
+                rad = np.radians(item['rot_deg'])
+                rot = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
+                moved = (src - src.mean(axis=0)) @ rot.T + target.mean(axis=0)
+                # 比「到最近目标点」的距离：两边绕向可能相反，逐点按编号比没意义
+                gap = np.linalg.norm(moved[:, None, :] - target[None, :, :], axis=2).min(axis=1)
+                if gap.max() > 12:
+                    problems.append(
+                        f"#{item['id']} 按 rot_deg={item['rot_deg']}° 转过去落不到目标上"
+                        f"（差 {gap.max():.0f}px），角度算错了")
         if not 0.0 <= assembly_result['fill'] <= 1.0:
             problems.append(f"拼接填充率 {assembly_result['fill']} 不在 0~1 之间，算错了")
         rw_, rh_ = assembly_result['size']
