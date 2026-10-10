@@ -492,15 +492,22 @@ def run_selftest():
             src = np.asarray(piece['polygon_warp'], float)
             target = np.asarray(item['polygon'], float)
             if len(src) == len(target) and 'rot_deg' in item:
+                # 要和**内缩之后**的那块比：placement 是内缩后那块刚体变换过去的，
+                # 拿没内缩的原始形状比会差上几个像素，内缩量大时能差十几像素——那是内缩
+                # 造成的，不是角度错。比内缩后的形状，关系是精确的，阈值就能卡得很紧。
+                # _ccw 不能省：_shrink_poly 是按逆时针往内缩的，喂它一个顺时针多边形
+                # 会变成往外扩（solve() 里也是先 _ccw 再 _shrink_poly）
+                shrunk = assembly._shrink_poly(assembly._ccw(src),
+                                               assembly_result.get('shrink_px', 0.0))
                 rad = np.radians(item['rot_deg'])
                 rot = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
-                moved = (src - src.mean(axis=0)) @ rot.T + target.mean(axis=0)
+                moved = (shrunk - shrunk.mean(axis=0)) @ rot.T + target.mean(axis=0)
                 # 比「到最近目标点」的距离：两边绕向可能相反，逐点按编号比没意义
                 gap = np.linalg.norm(moved[:, None, :] - target[None, :, :], axis=2).min(axis=1)
-                if gap.max() > 12:
+                if gap.max() > 2.0:
                     problems.append(
                         f"#{item['id']} 按 rot_deg={item['rot_deg']}° 转过去落不到目标上"
-                        f"（差 {gap.max():.0f}px），角度算错了")
+                        f"（差 {gap.max():.1f}px），角度算错了")
         if not 0.0 <= assembly_result['fill'] <= 1.0:
             problems.append(f"拼接填充率 {assembly_result['fill']} 不在 0~1 之间，算错了")
         rw_, rh_ = assembly_result['size']

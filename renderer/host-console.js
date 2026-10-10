@@ -25,6 +25,9 @@ const hostEl = {
   rot: document.getElementById('host-rot'),
   servoBtn: document.getElementById('act-servo'),
   emBtn: document.getElementById('act-em'),
+  pickBtn: document.getElementById('act-pick'),
+  placeBtn: document.getElementById('act-place'),
+  calibBtn: document.getElementById('act-calib'),
   send: document.getElementById('host-send'),
   echo: document.getElementById('host-echo'),
   log: document.getElementById('host-log'),
@@ -161,17 +164,100 @@ async function sendSettings() {
 // 放在控制台外面，是因为这两个是操作过程中要随手按的，不该先展开面板才能碰
 const actuator = { servo: false, em: false }
 
+// ── 吸 / 放：把「舵机放下 + 电磁铁 + 舵机升起」合成一个动作 ──────────
+// 吸：舵机放下 → 电磁铁吸合 → 舵机升起
+// 放：舵机放下 → 电磁铁释放 → 舵机升起
+//
+// 每步之间等这么久，整个动作约 1.4 秒（用户要求 2 秒内做完）。
+// 舵机行程长短要调就改这个数。
+const ACTION_STEP_MS = 700
+// 舵机哪个值是「放下」。接线不同可能正好相反——实测发现放不下/收不回就把这两个换过来
+const SERVO_DOWN = 1
+const SERVO_UP = 0
+
+// 一键校准：把 Y 开到这个脉冲，停一下再识别
+const CALIBRATE_Y_PULSE = 32000
+// 等机器真的走过去再识别——ACK 只代表命令收到，走一半就抓帧会识别到糊的
+const CALIBRATE_SETTLE_MS = 1500
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+let actionRunning = false        // 动作进行中：挡住重复触发
+
 function updateActuatorButtons() {
   hostEl.servoBtn.classList.toggle('active', actuator.servo)
   hostEl.emBtn.classList.toggle('active', actuator.em)
   hostEl.servoBtn.textContent = actuator.servo ? '舵机 开' : '舵机 关'
   hostEl.emBtn.textContent = actuator.em ? '电磁铁 吸合' : '电磁铁 释放'
-  const ready = hostConnected
-  hostEl.servoBtn.disabled = !ready
-  hostEl.emBtn.disabled = !ready
+  hostEl.servoBtn.disabled = !hostConnected
+  hostEl.emBtn.disabled = !hostConnected
+  // 吸/放/一键校准：没连上、或者已经有动作在跑，就按不动
+  for (const button of [hostEl.pickBtn, hostEl.placeBtn, hostEl.calibBtn]) {
+    button.disabled = !hostConnected || actionRunning
+  }
+}
+
+/** 吸或放：一整串动作当成一件事来做，中途失败就停在那儿并说明原因 */
+async function runPickPlace(action) {
+  if (actionRunning || !hostConnected) return
+  const isPick = action === 'pick'
+  const name = isPick ? '吸' : '放'
+  actionRunning = true
+  updateActuatorButtons()
+  try {
+    const steps = [
+      { servo: SERVO_DOWN, text: '舵机放下' },
+      { em: isPick ? 1 : 0, text: isPick ? '电磁铁吸合' : '电磁铁释放' },
+      { servo: SERVO_UP, text: '舵机升起' },
+    ]
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i]
+      const payload = { cmd: 'set' }
+      if (step.servo !== undefined) {
+        payload.servo = step.servo
+        actuator.servo = step.servo === 1
+      } else {
+        payload.em = step.em
+        actuator.em = step.em === 1
+      }
+      updateActuatorButtons()
+      hostLog(`${name} ${i + 1}/${steps.length}：${step.text}`)
+      const reply = await hostCommand(payload)
+      if (!reply?.ok) {
+        hostLog(`${name} 中断在第 ${i + 1} 步（${step.text}）`)
+        return
+      }
+      if (i < steps.length - 1) await sleep(ACTION_STEP_MS)
+    }
+    hostLog(`${name} 完成`)
+  } finally {
+    actionRunning = false
+    updateActuatorButtons()
+  }
+}
+
+/** 一键校准：Y 开到标定位置 → 停一下 → 识别一次 */
+async function oneClickCalibrate() {
+  if (actionRunning || !hostConnected) return
+  actionRunning = true
+  updateActuatorButtons()
+  try {
+    hostLog(`一键校准：Y → 脉冲 ${CALIBRATE_Y_PULSE}`)
+    const reply = await hostCommand({ cmd: 'set', y: CALIBRATE_Y_PULSE })
+    if (!reply?.ok) {
+      hostLog('一键校准中断：Y 没发出去')
+      return
+    }
+    await sleep(CALIBRATE_SETTLE_MS)
+    hostLog('一键校准：开始识别')
+    await recognizeOnce()
+  } finally {
+    actionRunning = false
+    updateActuatorButtons()
+  }
 }
 
 async function toggleActuator(which) {
+  if (actionRunning) return          // 动作进行中别插手，免得把时序打乱
   const next = !actuator[which]
   const before = actuator[which]
   actuator[which] = next          // 先按下去，手感跟手
@@ -333,6 +419,9 @@ function wireHostConsole() {
   })
   hostEl.servoBtn.addEventListener('click', () => toggleActuator('servo'))
   hostEl.emBtn.addEventListener('click', () => toggleActuator('em'))
+  hostEl.pickBtn.addEventListener('click', () => runPickPlace('pick'))
+  hostEl.placeBtn.addEventListener('click', () => runPickPlace('place'))
+  hostEl.calibBtn.addEventListener('click', oneClickCalibrate)
 
   el.board.addEventListener('click', onBoardClick)
   hostEl.calMove.addEventListener('change', () => {

@@ -34,6 +34,14 @@
       <button id="act-em" class="toggle" disabled
               title="先在「串口控制台」里连上机器">电磁铁</button>
 
+      <!-- 吸/放：把「舵机放下 + 电磁铁 + 舵机升起」合成一个动作 -->
+      <button id="act-pick" class="toggle" disabled
+              title="吸：舵机放下 → 电磁铁吸合 → 舵机升起">吸</button>
+      <button id="act-place" class="toggle" disabled
+              title="放：舵机放下 → 电磁铁释放 → 舵机升起">放</button>
+      <button id="act-calib" disabled
+              title="把 Y 轴开到标定位置，停顿一下再识别一次">一键校准</button>
+
       <button id="host-toggle">串口控制台</button>
     </header>
 
