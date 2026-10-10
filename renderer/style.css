@@ -345,6 +345,14 @@ video.hidden {
   user-select: text;
 }
 
+/* 舵机 / 电磁铁的常驻开关。开着的时候整颗按钮变绿，扫一眼就知道状态 */
+button.toggle.active {
+  background: #3ddc97;
+  border-color: #3ddc97;
+  color: #06131f;
+  font-weight: 600;
+}
+
 button.ghost {
   padding: 4px 8px;
   background: transparent;

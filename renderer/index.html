@@ -27,6 +27,13 @@
 
       <button id="snapshot" disabled>拍照保存</button>
       <button id="rescan">重新扫描</button>
+
+      <!-- 舵机和电磁铁做成常驻开关：不用展开控制台就能按，状态一眼可见 -->
+      <button id="act-servo" class="toggle" disabled
+              title="先在「串口控制台」里连上机器">舵机</button>
+      <button id="act-em" class="toggle" disabled
+              title="先在「串口控制台」里连上机器">电磁铁</button>
+
       <button id="host-toggle">串口控制台</button>
     </header>
 
@@ -125,9 +132,9 @@
           </div>
           <div class="host-row">
             <label class="host-num">旋转° <input id="host-rot" value="0" /></label>
-            <label class="field checkbox"><input type="checkbox" id="host-servo" /> 舵机</label>
-            <label class="field checkbox"><input type="checkbox" id="host-em" /> 电磁铁</label>
           </div>
+          <!-- 舵机/电磁铁不在这儿：它们是常驻开关，在顶部工具栏上 -->
+
           <div class="host-row">
             <button id="host-send" class="primary">下发</button>
             <button id="host-echo">回环测试</button>

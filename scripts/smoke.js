@@ -106,7 +106,6 @@ async function checkVision(win) {
   }
 
   await win.webContents.executeJavaScript('window.camAPI.vision.stop()')
-  await checkHostConsole(win)
 }
 
 /**
@@ -260,6 +259,10 @@ app.whenReady().then(async () => {
 
     // 视觉链路：真实抽帧 → IPC → Python → 结果回渲染进程
     await checkVision(win)
+
+    // 串口链路和相机没关系，**单独跑**：相机被别的程序占着时（很常见），
+    // checkVision 会提前返回，串口那段要是挂在它里面就永远验不到了
+    await checkHostConsole(win)
   } catch (error) {
     problems.push(`加载界面异常: ${error.message}`)
   }

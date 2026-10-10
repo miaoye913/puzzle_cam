@@ -23,8 +23,8 @@ const hostEl = {
   x: document.getElementById('host-x'),
   y: document.getElementById('host-y'),
   rot: document.getElementById('host-rot'),
-  servo: document.getElementById('host-servo'),
-  em: document.getElementById('host-em'),
+  servoBtn: document.getElementById('act-servo'),
+  emBtn: document.getElementById('act-em'),
   send: document.getElementById('host-send'),
   echo: document.getElementById('host-echo'),
   log: document.getElementById('host-log'),
@@ -94,6 +94,7 @@ function setConnected(connected) {
   hostEl.connect.textContent = connected ? '断开' : '连接'
   hostEl.connect.classList.toggle('stop', connected)
   hostEl.connect.classList.toggle('primary', !connected)
+  updateActuatorButtons()          // 没连上时两个开关按不动
 }
 
 function showStatus(status) {
@@ -104,6 +105,12 @@ function showStatus(status) {
   hostEl.state.homing.textContent = status.homing ? '是' : '否'
   hostEl.state.servo.textContent = status.servo ? '开' : '关'
   hostEl.state.em.textContent = status.electromagnet ? '吸合' : '释放'
+  // 工具栏上那两个开关跟着机器实际状态走——比如机器自己复位了，按钮不该还显示「开」
+  const next = { servo: !!status.servo, em: !!status.electromagnet }
+  if (next.servo !== actuator.servo || next.em !== actuator.em) {
+    Object.assign(actuator, next)
+    updateActuatorButtons()
+  }
 }
 
 async function refreshPorts() {
@@ -141,16 +148,42 @@ async function toggleConnection() {
 }
 
 async function sendSettings() {
-  const payload = {
+  const reply = await hostCommand({
     cmd: 'set',
     x: Number(hostEl.x.value) || 0,
     y: Number(hostEl.y.value) || 0,
     rot: Number(hostEl.rot.value) || 0,
-    servo: hostEl.servo.checked ? 1 : 0,
-    em: hostEl.em.checked ? 1 : 0,
-  }
-  const reply = await hostCommand(payload)
+  })
   if (reply?.ok) hostLog(`已下发：${(reply.sent ?? []).join(' ')}`)
+}
+
+// ── 舵机 / 电磁铁：工具栏上的常驻开关 ───────────────────────────────
+// 放在控制台外面，是因为这两个是操作过程中要随手按的，不该先展开面板才能碰
+const actuator = { servo: false, em: false }
+
+function updateActuatorButtons() {
+  hostEl.servoBtn.classList.toggle('active', actuator.servo)
+  hostEl.emBtn.classList.toggle('active', actuator.em)
+  hostEl.servoBtn.textContent = actuator.servo ? '舵机 开' : '舵机 关'
+  hostEl.emBtn.textContent = actuator.em ? '电磁铁 吸合' : '电磁铁 释放'
+  const ready = hostConnected
+  hostEl.servoBtn.disabled = !ready
+  hostEl.emBtn.disabled = !ready
+}
+
+async function toggleActuator(which) {
+  const next = !actuator[which]
+  const before = actuator[which]
+  actuator[which] = next          // 先按下去，手感跟手
+  updateActuatorButtons()
+  const reply = await hostCommand({ cmd: 'set', [which]: next ? 1 : 0 })
+  if (!reply?.ok) {
+    // 没发出去就翻回来，别让按钮显示一个机器根本没执行的状态
+    actuator[which] = before
+    updateActuatorButtons()
+    return
+  }
+  hostLog(`${which === 'servo' ? '舵机' : '电磁铁'} → ${next ? '开' : '关'}`)
 }
 
 // ── 坐标映射（脉冲 ↔ 板面）────────────────────────────────────────
@@ -298,6 +331,9 @@ function wireHostConsole() {
     fillCalibrationForm()
     applyCalibrationForm()
   })
+  hostEl.servoBtn.addEventListener('click', () => toggleActuator('servo'))
+  hostEl.emBtn.addEventListener('click', () => toggleActuator('em'))
+
   el.board.addEventListener('click', onBoardClick)
   hostEl.calMove.addEventListener('change', () => {
     el.board.classList.toggle('movable', hostEl.calMove.checked)
@@ -326,6 +362,7 @@ function wireHostConsole() {
   // 把存下来的标定填进框里，并显示一次读数
   fillCalibrationForm()
   updateCalReadout()
+  updateActuatorButtons()          // 初始态：没连接，两个开关是灰的
 }
 
 if (window.camAPI?.host) wireHostConsole()
