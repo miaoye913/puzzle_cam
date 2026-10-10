@@ -144,6 +144,18 @@
             <p class="muted" id="cal-readout">机器位置：未连接</p>
           </section>
 
+          <!-- 搬运坐标：每块的「未拼」（现在在哪）和「已拼」（拼好该在哪），
+               毫米和脉冲都给——对不上时一眼看出是换算还是机器的问题 -->
+          <section class="settings-card">
+            <h3>搬运坐标<span class="muted">（未拼 / 已拼）</span></h3>
+            <table class="path-table">
+              <thead>
+                <tr><th>块</th><th>未拼 板面 / 脉冲</th><th>已拼 板面 / 脉冲</th><th>转角</th></tr>
+              </thead>
+              <tbody id="path-table"><tr><td colspan="4" class="muted">还没识别</td></tr></tbody>
+            </table>
+          </section>
+
           <section class="settings-card">
             <h3>串口 · 拼图机</h3>
             <div class="host-row">

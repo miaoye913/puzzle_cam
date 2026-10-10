@@ -359,6 +359,8 @@ function renderView() {
   const layout = drawBoard(lastResult)
   drawOverlay(lastResult, layout)
   drawAssembly(lastResult)
+  // 设置页那张搬运坐标表也跟着刷（它定义在 host-console.js 里，页面加载完才在）
+  if (typeof updatePathTable === 'function') updatePathTable(lastResult)
 }
 
 /**
@@ -760,16 +762,29 @@ function drawOverlay(result, layout) {
       ctx.closePath()
       ctx.fill()
 
-      // 标一下这块要转多少度——光看一条线看不出转角
-      const mx = (x0 + x1) / 2
-      const my = (y0 + y1) / 2
-      const text = `#${path.id}  ${path.dRot >= 0 ? '+' : ''}${path.dRot.toFixed(0)}°`
+      // 两端各标一条坐标：起点是**未拼**（碎片现在在哪），终点是**已拼**（拼好后该在哪）。
+      // 同时给毫米和脉冲——毫米是画面上的位置、脉冲是发给机器的值，
+      // 两者对不上就能一眼分出是「换算」的问题还是「机器」的问题。
+      const coords = (bx, by, prefix, tail = '') => {
+        const [mmx, mmy] = boardPxToMm(bx, by, boardW, boardH)
+        const [px, py] = boardToPulses(bx, by, boardW, boardH)
+        return `${prefix} ${mmx.toFixed(0)},${mmy.toFixed(0)}mm / ` +
+               `${Math.round(px)},${Math.round(py)}${tail}`
+      }
       ctx.font = '600 12px "Segoe UI", "Microsoft YaHei", sans-serif'
       ctx.lineWidth = 3
       ctx.strokeStyle = 'rgba(0,0,0,0.8)'
-      ctx.strokeText(text, mx + 6, my - 4)
+      ctx.textAlign = 'right'
+      const fromText = coords(path.from[0], path.from[1], `#${path.id} 未拼`)
+      ctx.strokeText(fromText, x0 - 8, y0 + 4)
       ctx.fillStyle = PATH_COLOR
-      ctx.fillText(text, mx + 6, my - 4)
+      ctx.fillText(fromText, x0 - 8, y0 + 4)
+      ctx.textAlign = 'left'
+      const toText = coords(path.to[0], path.to[1], `#${path.id} 已拼`,
+        ` 转${path.dRot >= 0 ? '+' : ''}${path.dRot.toFixed(0)}°`)
+      ctx.strokeText(toText, x1 + 8, y1 + 4)
+      ctx.fillText(toText, x1 + 8, y1 + 4)
+      ctx.textAlign = 'start'
       ctx.lineWidth = 1.5
       ctx.strokeStyle = PATH_COLOR
     }

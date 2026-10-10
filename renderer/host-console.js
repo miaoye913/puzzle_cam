@@ -382,6 +382,52 @@ async function autoAssemble() {
   }
 }
 
+/**
+ * 把每块碎片的「未拼」（现在在哪）和「已拼」（拼好该在哪）填进设置页那张表。
+ *
+ * 毫米和脉冲都给：毫米是画面上的位置，脉冲是发给机器的值。
+ * 自动拼图出问题时，先看这两列——**目标脉冲对不对**一眼就能判断是换算错了还是机器没走到。
+ */
+function updatePathTable(result) {
+  const body = document.getElementById('path-table')
+  if (!body) return
+  const reset = (text) => {
+    body.replaceChildren()
+    const tr = document.createElement('tr')
+    const td = document.createElement('td')
+    td.colSpan = 4
+    td.className = 'muted'
+    td.textContent = text
+    tr.append(td)
+    body.append(tr)
+  }
+  const ctx = result?.board?.found ? currentAssemblyMap(result) : null
+  if (!ctx) { reset('还没识别'); return }
+  const rect = result.board.rect_size
+  const paths = planPaths(result, ctx.map)
+  if (!paths.length) { reset('没拼出矩形'); return }
+
+  body.replaceChildren()
+  for (const path of paths) {
+    const tr = document.createElement('tr')
+    const cell = (content) => {
+      const td = document.createElement('td')
+      td.textContent = content
+      tr.append(td)
+    }
+    const coords = (bx, by) => {
+      const [mx, my] = boardPxToMm(bx, by, rect[0], rect[1])
+      const [px, py] = boardToPulses(bx, by, rect[0], rect[1])
+      return `${mx.toFixed(0)}, ${my.toFixed(0)} / ${Math.round(px)}, ${Math.round(py)}`
+    }
+    cell(`#${path.id}`)
+    cell(coords(path.from[0], path.from[1]))
+    cell(coords(path.to[0], path.to[1]))
+    cell(`${path.dRot >= 0 ? '+' : ''}${path.dRot.toFixed(0)}°`)
+    body.append(tr)
+  }
+}
+
 /** 一键校准：Y 开到标定位置 → 停一下 → 识别一次 */
 async function oneClickCalibrate() {
   if (actionRunning || !hostConnected) return
