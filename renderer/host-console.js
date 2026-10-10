@@ -44,6 +44,7 @@ const hostEl = {
   calCalibY: document.getElementById('cal-caliby'),
   calCalibWait: document.getElementById('cal-calibwait'),
   calCarryDwell: document.getElementById('cal-carrydwell'),
+  calSettleDwell: document.getElementById('cal-settledwell'),
   calReadout: document.getElementById('cal-readout'),
   calMove: document.getElementById('cal-move'),
   rotMain: document.getElementById('rot-main'),
@@ -285,7 +286,7 @@ async function runPickPlace(action) {
 const AUTO_MOVE_TIMEOUT_MS = 8000   // 单次移动最多等这么久，等不到就往下走
 const AUTO_POLL_MS = 250            // 轮询机器位置的间隔
 const AUTO_POS_TOL = 30             // 脉冲；判「到位」的容差
-const AUTO_SETTLE_MS = 2500         // 位置报不回来时，退化成固定等待
+const AUTO_MOVE_FALLBACK_MS = 2500  // 位置报不回来时，退化成固定等待
 
 let autoRunning = false
 let autoAbort = false
@@ -307,29 +308,44 @@ let autoPollWorks = null
 async function moveAndWait(x, y, label) {
   const reply = await hostCommand({ cmd: 'set', x, y })
   if (!reply?.ok) return false
+
   if (autoPollWorks === false) {
-    await sleep(AUTO_SETTLE_MS)
-    return true
-  }
-  const deadline = performance.now() + AUTO_MOVE_TIMEOUT_MS
-  while (performance.now() < deadline) {
-    if (autoAbort) return true
-    await sleep(AUTO_POLL_MS)
-    // 注意：hostCommand 已经把 IPC 那层 {ok, reply} 拆掉了，直接就是回复本身。
-    // 这里多写一层 .reply 的话永远是 undefined，就会变成「每次都等满超时」。
-    const status = (await hostCommand({ cmd: 'get_all' }))?.status
-    if (status && Math.abs(status.posX - x) <= AUTO_POS_TOL &&
-        Math.abs(status.posY - y) <= AUTO_POS_TOL) {
-      autoPollWorks = true
-      return true
+    // 位置报不回来，只能按固定时间估
+    await sleep(AUTO_MOVE_FALLBACK_MS)
+  } else {
+    const deadline = performance.now() + AUTO_MOVE_TIMEOUT_MS
+    let arrived = false
+    while (performance.now() < deadline) {
+      if (autoAbort) break
+      await sleep(AUTO_POLL_MS)
+      // 注意：hostCommand 已经把 IPC 那层 {ok, reply} 拆掉了，直接就是回复本身。
+      // 这里多写一层 .reply 的话永远是 undefined，就会变成「每次都等满超时」。
+      const status = (await hostCommand({ cmd: 'get_all' }))?.status
+      if (status && Math.abs(status.posX - x) <= AUTO_POS_TOL &&
+          Math.abs(status.posY - y) <= AUTO_POS_TOL) {
+        autoPollWorks = true
+        arrived = true
+        break
+      }
+    }
+    if (!arrived) {
+      if (autoPollWorks === null) {
+        autoPollWorks = false
+        hostLog('位置一直对不上目标值（协议说明里 posX/posY 是「只增不减」的逻辑坐标），' +
+                `后面改成按固定时间等 ${AUTO_MOVE_FALLBACK_MS}ms`)
+      } else {
+        hostLog(`${label}：等到位超时，继续往下走`)
+      }
     }
   }
-  if (autoPollWorks === null) {
-    autoPollWorks = false
-    hostLog('位置一直对不上目标值（协议说明里 posX/posY 是「只增不减」的逻辑坐标），' +
-            `后面改成按固定时间等 ${AUTO_SETTLE_MS}ms`)
-  } else {
-    hostLog(`${label}：等到位超时，继续往下走`)
+
+  // 到位之后再停一下才动舵机。
+  // 位置对上**不等于**机器停稳了——还在晃、还在收尾。马上降/升舵机会蹭到碎片。
+  // 时长在设置页「到位停留」里可调。
+  const settle = Math.max(0, Math.round(Number(calibration.autoSettleMs) || 0))
+  if (settle && !autoAbort) {
+    hostLog(`   ${label}到位，停 ${settle}ms 等停稳`)
+    await sleep(settle)
   }
   return true
 }
@@ -530,7 +546,7 @@ async function toggleActuator(which) {
 const CAL_DEFAULTS = {
   xMin: 500, xMax: 2200, yMin: 2200, yMax: 25100,
   invertX: false, invertY: false, boardW: 297, boardH: 210,
-  calibYPulse: 32000, calibSettleMs: 4000, autoCarryDwellMs: 1000,
+  calibYPulse: 32000, calibSettleMs: 4000, autoCarryDwellMs: 1000, autoSettleMs: 800,
 }
 
 function fillCalibrationForm() {
@@ -545,6 +561,7 @@ function fillCalibrationForm() {
   hostEl.calCalibY.value = calibration.calibYPulse
   hostEl.calCalibWait.value = calibration.calibSettleMs
   hostEl.calCarryDwell.value = calibration.autoCarryDwellMs
+  hostEl.calSettleDwell.value = calibration.autoSettleMs
 }
 
 function applyCalibrationForm() {
@@ -563,6 +580,7 @@ function applyCalibrationForm() {
   calibration.calibYPulse = num(hostEl.calCalibY, calibration.calibYPulse)
   calibration.calibSettleMs = num(hostEl.calCalibWait, calibration.calibSettleMs)
   calibration.autoCarryDwellMs = num(hostEl.calCarryDwell, calibration.autoCarryDwellMs)
+  calibration.autoSettleMs = num(hostEl.calSettleDwell, calibration.autoSettleMs)
   saveCalibration()
   renderView()          // 网格刻度和准星都跟着范围变，立刻重画
   updateCalReadout()
@@ -676,7 +694,7 @@ function wireHostConsole() {
   // 坐标映射那几个框：改完立刻存下来并重画，不用点「应用」
   for (const input of [hostEl.calXMin, hostEl.calXMax, hostEl.calYMin, hostEl.calYMax,
     hostEl.calBW, hostEl.calBH, hostEl.calCalibY, hostEl.calCalibWait,
-    hostEl.calCarryDwell]) {
+    hostEl.calCarryDwell, hostEl.calSettleDwell]) {
     input.addEventListener('change', applyCalibrationForm)
   }
   hostEl.calInvX.addEventListener('change', applyCalibrationForm)

@@ -147,7 +147,13 @@
               <label class="host-num">校准位移 Y <input id="cal-caliby" class="cal-num" /></label>
               <label class="host-num">等待 <input id="cal-calibwait" class="cal-num" /> ms</label>
             </div>
-            <!-- 吸起来之后停多久再开始搬。舵机升到位要时间，不等就拖着碎片蹭 -->
+            <!-- 两处停留：走到位了先停稳再动舵机；吸起来了先停一下再走 -->
+            <div class="host-row">
+              <label class="host-num">到位停留
+                <input id="cal-settledwell" class="cal-num" /> ms
+              </label>
+              <span class="muted">走到位后、动舵机前</span>
+            </div>
             <div class="host-row">
               <label class="host-num">搬运停留
                 <input id="cal-carrydwell" class="cal-num" /> ms
