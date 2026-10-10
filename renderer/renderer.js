@@ -505,6 +505,44 @@ function drawCalibrationGrid(ctx, rectW, rectH, layout) {
   ctx.restore()
 }
 
+/** 在板面上点出来的目标点（板面像素）。点完画个标记，机器走过去之后两者就重合了 */
+let clickTarget = null
+
+/** 点选的目标：一个准心 + 从机器当前位置连过来的虚线（机器在走，线会一直缩短） */
+function drawClickTarget(ctx, rectW, rectH, layout) {
+  if (!clickTarget) return
+  const cx = clickTarget[0] * layout.scale
+  const cy = clickTarget[1] * layout.scale
+  ctx.save()
+  ctx.strokeStyle = PATH_COLOR
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.arc(cx, cy, 9, 0, Math.PI * 2)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.moveTo(cx - 15, cy)
+  ctx.lineTo(cx - 5, cy)
+  ctx.moveTo(cx + 5, cy)
+  ctx.lineTo(cx + 15, cy)
+  ctx.moveTo(cx, cy - 15)
+  ctx.lineTo(cx, cy - 5)
+  ctx.moveTo(cx, cy + 5)
+  ctx.lineTo(cx, cy + 15)
+  ctx.stroke()
+
+  if (machinePose) {
+    const [mx, my] = pulsesToBoard(machinePose.x, machinePose.y, rectW, rectH)
+    ctx.setLineDash([5, 4])
+    ctx.strokeStyle = 'rgba(255,209,102,0.75)'
+    ctx.lineWidth = 1.5
+    ctx.beginPath()
+    ctx.moveTo(mx * layout.scale, my * layout.scale)
+    ctx.lineTo(cx, cy)
+    ctx.stroke()
+  }
+  ctx.restore()
+}
+
 /** 机器此刻在板子的哪儿。脉冲跑出标定范围时画成红色、提示超出 */
 function drawMachineMarker(ctx, rectW, rectH, layout) {
   if (!machinePose) return
@@ -760,8 +798,9 @@ function drawOverlay(result, layout) {
     ctx.fillText(text, mx, my)
   }
 
-  // 机器位置画在最上层：它是「此刻在哪」，被别的东西盖住就没意义了
+  // 机器位置和目标点画在最上层：它们是「此刻在哪 / 要去哪」，被别的东西盖住就没意义了
   drawMachineMarker(ctx, boardW, boardH, layout)
+  drawClickTarget(ctx, boardW, boardH, layout)
 
   // 画完再按「显示叠加层」那个勾决定露不露脸，免得把用户的勾选覆盖掉
   syncOverlayVisibility()

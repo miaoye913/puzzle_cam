@@ -125,6 +125,11 @@ select {
   position: absolute;
 }
 
+/* 勾上「点击画面移动机器」之后，把鼠标变成十字准心，提示点下去会动 */
+#board.movable {
+  cursor: crosshair;
+}
+
 /* 浮动小窗：左下放拼好的矩形，右下放原始画面 */
 .float-win {
   position: absolute;

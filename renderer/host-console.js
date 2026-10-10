@@ -38,6 +38,7 @@ const hostEl = {
   calBH: document.getElementById('cal-bh'),
   calReset: document.getElementById('cal-reset'),
   calReadout: document.getElementById('cal-readout'),
+  calMove: document.getElementById('cal-move'),
   state: {
     x: document.getElementById('host-sx'),
     y: document.getElementById('host-sy'),
@@ -212,6 +213,47 @@ function onMachinePose(status) {
   renderView()
 }
 
+/**
+ * 点板面 → 机器开过去。
+ *
+ * 换算链是：点击的画布像素 → 板面像素 → 毫米 → 脉冲，全在 calibration.js 里，
+ * 这里只负责把点击位置喂进去、把脉冲发下去。
+ *
+ * **默认关着**（面板里那个勾）：这是会动真硬件的操作，误点一下机器就跑了，
+ * 所以要有意勾上才生效。
+ */
+function onBoardClick(event) {
+  if (!hostEl.calMove.checked) return
+  const rect = lastResult?.board?.rect_size
+  if (!rect) {
+    hostLog('还没有识别结果，先点「识别一次」')
+    return
+  }
+  const box = el.board.getBoundingClientRect()
+  if (!box.width || !box.height) return
+  const bx = ((event.clientX - box.left) / box.width) * rect[0]
+  const by = ((event.clientY - box.top) / box.height) * rect[1]
+  if (bx < 0 || by < 0 || bx > rect[0] || by > rect[1]) return   // 点在板子外面
+
+  const [xmm, ymm] = boardPxToMm(bx, by, rect[0], rect[1])
+  const [px, py] = mmToPulses(xmm, ymm)
+  const target = { x: Math.round(px), y: Math.round(py) }
+  clickTarget = [bx, by]
+  renderView()
+  hostLog(`点击 → 板面(${xmm.toFixed(0)}, ${ymm.toFixed(0)}) mm → 脉冲(${target.x}, ${target.y})`)
+  hostCommand({ cmd: 'set', x: target.x, y: target.y }).then(async () => {
+    // 顺手补查一次：ACK 只代表命令**收到**了，位置得另外问。不补这一次的话，
+    // 准星要等到下一次轮询才动，看着像没反应。想连续跟着走就开「自动轮询状态」。
+    setTimeout(async () => {
+      const reply = await hostCommand({ cmd: 'get_all' })
+      if (reply?.status) {
+        showStatus(reply.status)
+        onMachinePose(reply.status)
+      }
+    }, 700)
+  })
+}
+
 function wireHostConsole() {
   hostEl.toggle.addEventListener('click', async () => {
     const willShow = hostEl.panel.classList.contains('hidden')
@@ -255,6 +297,16 @@ function wireHostConsole() {
     Object.assign(calibration, CAL_DEFAULTS)
     fillCalibrationForm()
     applyCalibrationForm()
+  })
+  el.board.addEventListener('click', onBoardClick)
+  hostEl.calMove.addEventListener('change', () => {
+    el.board.classList.toggle('movable', hostEl.calMove.checked)
+    if (hostEl.calMove.checked) {
+      hostLog('已开启「点击画面移动机器」——再点板面就会把机器开过去')
+    } else {
+      clickTarget = null
+      renderView()
+    }
   })
 
   window.camAPI.host.onLog(hostLog)
