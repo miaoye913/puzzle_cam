@@ -34,6 +34,8 @@ const hostEl = {
   calYMax: document.getElementById('cal-ymax'),
   calInvX: document.getElementById('cal-invx'),
   calInvY: document.getElementById('cal-invy'),
+  calBW: document.getElementById('cal-bw'),
+  calBH: document.getElementById('cal-bh'),
   calReset: document.getElementById('cal-reset'),
   calReadout: document.getElementById('cal-readout'),
   state: {
@@ -152,7 +154,8 @@ async function sendSettings() {
 
 // ── 坐标映射（脉冲 ↔ 板面）────────────────────────────────────────
 const CAL_DEFAULTS = {
-  xMin: 500, xMax: 2200, yMin: 2200, yMax: 25100, invertX: false, invertY: false,
+  xMin: 500, xMax: 2200, yMin: 2200, yMax: 25100,
+  invertX: false, invertY: false, boardW: 297, boardH: 210,
 }
 
 function fillCalibrationForm() {
@@ -162,6 +165,8 @@ function fillCalibrationForm() {
   hostEl.calYMax.value = calibration.yMax
   hostEl.calInvX.checked = calibration.invertX
   hostEl.calInvY.checked = calibration.invertY
+  hostEl.calBW.value = calibration.boardW
+  hostEl.calBH.value = calibration.boardH
 }
 
 function applyCalibrationForm() {
@@ -175,6 +180,8 @@ function applyCalibrationForm() {
   calibration.yMax = num(hostEl.calYMax, calibration.yMax)
   calibration.invertX = hostEl.calInvX.checked
   calibration.invertY = hostEl.calInvY.checked
+  calibration.boardW = num(hostEl.calBW, calibration.boardW)
+  calibration.boardH = num(hostEl.calBH, calibration.boardH)
   saveCalibration()
   renderView()          // 网格刻度和准星都跟着范围变，立刻重画
   updateCalReadout()
@@ -191,11 +198,11 @@ function updateCalReadout() {
       `机器脉冲(${Math.round(machinePose.x)}, ${Math.round(machinePose.y)})，还没有板面`
     return
   }
-  const [bx, by] = pulsesToBoard(machinePose.x, machinePose.y, rect[0], rect[1])
+  const [xmm, ymm] = pulsesToMm(machinePose.x, machinePose.y)
   const out = pulseOutOfRange(machinePose.x, machinePose.y)
   hostEl.calReadout.textContent =
     `机器脉冲(${Math.round(machinePose.x)}, ${Math.round(machinePose.y)}) → ` +
-    `板面(${Math.round(bx)}, ${Math.round(by)})${out ? ' 超出范围' : ''}`
+    `板面(${xmm.toFixed(0)}, ${ymm.toFixed(0)}) mm${out ? ' 超出范围' : ''}`
 }
 
 /** 机器位置一变就重画板面，准星跟着走 */
@@ -238,7 +245,8 @@ function wireHostConsole() {
   })
 
   // 坐标映射那几个框：改完立刻存下来并重画，不用点「应用」
-  for (const input of [hostEl.calXMin, hostEl.calXMax, hostEl.calYMin, hostEl.calYMax]) {
+  for (const input of [hostEl.calXMin, hostEl.calXMax, hostEl.calYMin, hostEl.calYMax,
+    hostEl.calBW, hostEl.calBH]) {
     input.addEventListener('change', applyCalibrationForm)
   }
   hostEl.calInvX.addEventListener('change', applyCalibrationForm)

@@ -457,10 +457,11 @@ function planPaths(result, assemblyMap) {
 }
 
 /**
- * 板面坐标网格。
+ * 板面坐标网格：**刻度标的是毫米**。
  *
- * 刻度标的是**脉冲**而不是像素——这套坐标系存在的意义就是「机器的脉冲落在板子的哪儿」，
- * 标脉冲才读得出标定对不对。方向翻转由 boardToPulses 自己处理，这里不用管。
+ * 标毫米而不是脉冲或像素，是因为毫米才是那个「物理上说得通」的量纲——像素绑死分辨率，
+ * 脉冲绑死电机，只有毫米既是板子上的真实位置、又能和机器对话（乘一个脉冲/毫米就是脉冲）。
+ * 方向翻转由 boardPxToMm 自己处理，这里不用管。
  */
 function drawCalibrationGrid(ctx, rectW, rectH, layout) {
   const divisions = 8
@@ -487,7 +488,7 @@ function drawCalibrationGrid(ctx, rectW, rectH, layout) {
     ctx.moveTo(gx, 0)
     ctx.lineTo(gx, layout.h)
     ctx.stroke()
-    tick(String(Math.round(boardToPulses((i / divisions) * rectW, 0, rectW, rectH)[0])),
+    tick(String(Math.round(boardPxToMm((i / divisions) * rectW, 0, rectW, rectH)[0])),
       gx, layout.h - 5, 'center')
   }
   for (let i = 1; i < divisions; i++) {
@@ -498,7 +499,7 @@ function drawCalibrationGrid(ctx, rectW, rectH, layout) {
     ctx.moveTo(0, gy)
     ctx.lineTo(layout.w, gy)
     ctx.stroke()
-    tick(String(Math.round(boardToPulses(0, (i / divisions) * rectH, rectW, rectH)[1])),
+    tick(String(Math.round(boardPxToMm(0, (i / divisions) * rectH, rectW, rectH)[1])),
       5, gy - 3, 'left')
   }
   ctx.restore()
@@ -526,8 +527,9 @@ function drawMachineMarker(ctx, rectW, rectH, layout) {
   ctx.arc(cx, cy, 6, 0, Math.PI * 2)
   ctx.stroke()
 
+  const [xmm, ymm] = pulsesToMm(machinePose.x, machinePose.y)
   const text = `脉冲(${Math.round(machinePose.x)}, ${Math.round(machinePose.y)}) → ` +
-    `板面(${Math.round(bx)}, ${Math.round(by)})${out ? ' 超出范围' : ''}`
+    `板面(${xmm.toFixed(0)}, ${ymm.toFixed(0)}) mm${out ? ' 超出范围' : ''}`
   ctx.font = '600 12px "Segoe UI", "Microsoft YaHei", sans-serif'
   ctx.textAlign = 'center'
   ctx.lineWidth = 3
