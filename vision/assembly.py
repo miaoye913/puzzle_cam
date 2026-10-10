@@ -256,10 +256,13 @@ def _beam_solve(polys, beam_width=BEAM_WIDTH, deadline=None):
 
     best = None
     for transforms, err in states:
+        # ids 必须和 placed **同序**：transforms 是按「先放基准块、再放别的」的插入顺序，
+        # 而基准块是面积最大的那块，未必是 0 号——用 sorted(transforms) 会错位，
+        # 表现就是左边拼好的矩形里，某一块的形状和右边它标的编号对不上
+        ids = list(transforms)
         placed = [_apply(polys[i], t) for i, t in transforms.items()]
         score, metrics = _final_score(placed, [areas[i] for i in transforms])
         if best is None or score < best[0]:
-            ids = sorted(transforms)
             best = (score, metrics, ids, [np.asarray(x, np.float64) for x in placed])
     return best
 

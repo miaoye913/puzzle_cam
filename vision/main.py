@@ -332,6 +332,19 @@ def rounded_wedge(tip, a, b, radius, steps=24):
     return np.array([a] + [t1] + arc + [t2, b], np.int32)
 
 
+def _polygon_angles(polygon):
+    """多边形内角（升序）。刚体变换和平移内缩都不改变内角，所以拿它验「编号有没有错位」最稳。"""
+    pts = np.asarray(polygon, float)
+    n = len(pts)
+    out = []
+    for i in range(n):
+        v1 = pts[(i - 1) % n] - pts[i]
+        v2 = pts[(i + 1) % n] - pts[i]
+        cos = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+        out.append(float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))))
+    return sorted(out)
+
+
 def _selftest_assembly():
     """
     拼接求解器的合成用例：自己切一个 240×150 的矩形成 4 块，看能不能还原。
@@ -455,6 +468,20 @@ def run_selftest():
         if sorted(p['id'] for p in assembly_result['placements']) != \
                 sorted(p['id'] for p in result['pieces']):
             problems.append('拼接结果里的碎块编号和识别到的对不上')
+
+        # 每块拼好的形状，必须是**它自己那块**刚体变换过去的。刚体变换和平移内缩都不改变
+        # 内角，所以内角对不上就是编号错位了——曾经踩过：placed 按插入顺序、ids 却排了序，
+        # 结果左边拼好的矩形里，某一块的形状和它标的编号对不上。
+        for item in assembly_result['placements']:
+            piece = next((p for p in result['pieces'] if p['id'] == item['id']), None)
+            if piece is None or not piece.get('polygon_warp'):
+                continue
+            want = _polygon_angles(piece['polygon_warp'])
+            got = _polygon_angles(item['polygon'])
+            if len(want) != len(got) or any(abs(a - b) > 1.5 for a, b in zip(want, got)):
+                problems.append(
+                    f"#{item['id']} 拼好后的形状和它自己那块对不上（编号错位）："
+                    f"{[round(a, 1) for a in want]} vs {[round(a, 1) for a in got]}")
         if not 0.0 <= assembly_result['fill'] <= 1.0:
             problems.append(f"拼接填充率 {assembly_result['fill']} 不在 0~1 之间，算错了")
         rw_, rh_ = assembly_result['size']
