@@ -45,6 +45,7 @@ const hostEl = {
   calCalibWait: document.getElementById('cal-calibwait'),
   calCarryDwell: document.getElementById('cal-carrydwell'),
   calSettleDwell: document.getElementById('cal-settledwell'),
+  calActionStep: document.getElementById('cal-actionstep'),
   calReadout: document.getElementById('cal-readout'),
   calMove: document.getElementById('cal-move'),
   rotMain: document.getElementById('rot-main'),
@@ -186,9 +187,8 @@ const ACTUATOR_GUARD_MS = 1200
 // 吸：舵机放下 → 电磁铁吸合 → 舵机升起
 // 放：舵机放下 → 电磁铁释放 → 舵机升起
 //
-// 每步之间等这么久，整个动作约 1.4 秒（用户要求 2 秒内做完）。
-// 舵机行程长短要调就改这个数。
-const ACTION_STEP_MS = 700
+// 三步之间的间隔现在在设置页「吸/放步进」里可调（calibration.actionStepMs）。
+// 说明见 README：舵机行程长短不一样，这个数得能当场调。
 // 舵机哪个值是「放下」。接线不同可能正好相反——实测发现放不下/收不回就把这两个换过来
 const SERVO_DOWN = 1
 const SERVO_UP = 0
@@ -272,7 +272,7 @@ async function runPickPlace(action) {
         return
       }
       actuatorGuardUntil = performance.now() + ACTUATOR_GUARD_MS
-      if (i < steps.length - 1) await sleep(ACTION_STEP_MS)
+      if (i < steps.length - 1) await sleep(Math.max(0, Math.round(Number(calibration.actionStepMs) || 0)))
     }
     hostLog(`${name} 完成`)
   } finally {
@@ -546,7 +546,7 @@ async function toggleActuator(which) {
 const CAL_DEFAULTS = {
   xMin: 500, xMax: 2200, yMin: 2200, yMax: 25100,
   invertX: false, invertY: false, boardW: 297, boardH: 210,
-  calibYPulse: 32000, calibSettleMs: 4000, autoCarryDwellMs: 1000, autoSettleMs: 800,
+  calibYPulse: 32000, calibSettleMs: 4000, autoCarryDwellMs: 1000, autoSettleMs: 800, actionStepMs: 700,
 }
 
 function fillCalibrationForm() {
@@ -562,6 +562,7 @@ function fillCalibrationForm() {
   hostEl.calCalibWait.value = calibration.calibSettleMs
   hostEl.calCarryDwell.value = calibration.autoCarryDwellMs
   hostEl.calSettleDwell.value = calibration.autoSettleMs
+  hostEl.calActionStep.value = calibration.actionStepMs
 }
 
 function applyCalibrationForm() {
@@ -581,6 +582,7 @@ function applyCalibrationForm() {
   calibration.calibSettleMs = num(hostEl.calCalibWait, calibration.calibSettleMs)
   calibration.autoCarryDwellMs = num(hostEl.calCarryDwell, calibration.autoCarryDwellMs)
   calibration.autoSettleMs = num(hostEl.calSettleDwell, calibration.autoSettleMs)
+  calibration.actionStepMs = num(hostEl.calActionStep, calibration.actionStepMs)
   saveCalibration()
   renderView()          // 网格刻度和准星都跟着范围变，立刻重画
   updateCalReadout()
@@ -694,7 +696,7 @@ function wireHostConsole() {
   // 坐标映射那几个框：改完立刻存下来并重画，不用点「应用」
   for (const input of [hostEl.calXMin, hostEl.calXMax, hostEl.calYMin, hostEl.calYMax,
     hostEl.calBW, hostEl.calBH, hostEl.calCalibY, hostEl.calCalibWait,
-    hostEl.calCarryDwell, hostEl.calSettleDwell]) {
+    hostEl.calCarryDwell, hostEl.calSettleDwell, hostEl.calActionStep]) {
     input.addEventListener('change', applyCalibrationForm)
   }
   hostEl.calInvX.addEventListener('change', applyCalibrationForm)
