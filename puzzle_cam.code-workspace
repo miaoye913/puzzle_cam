@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"python.analysis.extraPaths": [
+			"C:\\Users\\49627\\.kendryte\\k230_canmv_stubs\\d5141688f15a8df4c5e40d34bfc0bfece189c5b2"
+		]
+	}
+}

@@ -1,0 +1,284 @@
+:root {
+  --bg: #111317;
+  --panel: #1a1d23;
+  --line: #2b3038;
+  --text: #e6e8ec;
+  --muted: #8b929e;
+  --accent: #4c8dff;
+  --accent-text: #06131f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  user-select: none;
+}
+
+.toolbar,
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--panel);
+}
+
+.toolbar {
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.statusbar {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.spacer {
+  flex: 1;
+}
+
+button {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #23272f;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: #3d444f;
+  background: #2b303a;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+button.primary.stop {
+  background: #ff5d5d;
+  color: #1b0b0b;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.field.checkbox {
+  cursor: pointer;
+}
+
+select {
+  max-width: 240px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #23272f;
+  color: var(--text);
+  font: inherit;
+}
+
+.stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: #0b0d10;
+  overflow: hidden;
+}
+
+/* 主画面：矫正后的板面。board 和 overlay 由 JS 算成同样大小、叠在一起 */
+.board-pane {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+#board {
+  position: absolute;
+}
+
+/* 浮动小窗：左下放拼好的矩形，右下放原始画面 */
+.float-win {
+  position: absolute;
+  bottom: 12px;
+  width: 196px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 45%);
+  overflow: hidden;
+}
+
+.float-win .win-title {
+  margin: 0;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  background: #16191f;
+}
+
+.float-win .win-body {
+  position: relative;
+  height: 150px;
+}
+
+.assembly-win {
+  left: 12px;
+}
+
+.camera-win {
+  right: 12px;
+}
+
+.assembly-win canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.camera-win video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+.assembly-win .hint {
+  position: absolute;
+  inset: auto 8px 8px 8px;
+  margin: 0;
+  text-align: center;
+  font-size: 11px;
+}
+
+.assembly-win .hint.hidden {
+  display: none;
+}
+
+video {
+  max-width: 100%;
+  max-height: 100%;
+  background: #000;
+}
+
+video.mirrored {
+  transform: scaleX(-1);
+}
+
+video.hidden {
+  display: none;
+}
+
+/* 叠加层严格贴住 video 的盒子，尺寸由 JS 按 video 的实际显示尺寸设置，
+   这样分析结果的坐标（分析分辨率）能线性映射到屏幕坐标 */
+.overlay {
+  position: absolute;
+  pointer-events: none;
+}
+
+.overlay.hidden {
+  display: none;
+}
+
+.vision-bar {
+  border-bottom: 1px solid var(--line);
+  background: #16191f;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.log-wrap {
+  /* 底部左右两角被两个浮动小窗占了，日志放中间 */
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 10px;
+  max-width: min(680px, 60%);
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(12, 14, 18, 0.92);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.log-wrap.hidden {
+  display: none;
+}
+
+.log-wrap summary {
+  cursor: pointer;
+}
+
+.log-wrap pre {
+  max-height: 180px;
+  margin: 8px 0 2px;
+  overflow: auto;
+  color: #b9c0cc;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 4px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.placeholder.hidden {
+  display: none;
+}
+
+.placeholder p {
+  margin: 0;
+}
+
+.placeholder .hint {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.placeholder.error {
+  color: #ff8f8f;
+}

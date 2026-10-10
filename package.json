@@ -1,0 +1,13 @@
+{
+  "name": "puzzle-cam",
+  "version": "0.1.0",
+  "description": "Electron 摄像头取流与预览",
+  "main": "main.js",
+  "scripts": {
+    "start": "node scripts/start.js",
+    "smoke": "node scripts/start.js scripts/smoke.js"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

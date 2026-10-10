@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self'"
+    />
+    <title>Puzzle Cam · 摄像头预览</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <button id="toggle" class="primary">开启摄像头</button>
+
+      <label class="field">
+        设备
+        <select id="device"></select>
+      </label>
+
+      <label class="field">
+        分辨率
+        <select id="resolution"></select>
+      </label>
+
+      <span class="spacer"></span>
+
+      <button id="snapshot" disabled>拍照保存</button>
+      <button id="rescan">重新扫描</button>
+    </header>
+
+    <header class="toolbar vision-bar">
+      <button id="recognize" class="primary" disabled>识别一次</button>
+
+      <label class="field">
+        分析分辨率
+        <select id="vision-scale">
+          <option value="640x360">640 × 360（快，短边不够准）</option>
+          <option value="960x540" selected>960 × 540（默认）</option>
+          <option value="1280x720">1280 × 720（准）</option>
+        </select>
+      </label>
+
+      <label class="field checkbox">
+        <input type="checkbox" id="vision-overlay" checked />
+        显示叠加层
+      </label>
+
+      <span class="spacer"></span>
+      <span id="vision-stats" class="muted"></span>
+    </header>
+
+    <main class="stage">
+      <div class="board-pane">
+        <!-- 主画面：裁切矫正后的板面。overlay 和它严格同尺寸叠在一起 -->
+        <canvas id="board"></canvas>
+        <canvas id="overlay" class="overlay hidden"></canvas>
+
+        <!-- 左下：拼好的矩形。注意 video 必须留在文档里（抽帧要从它拿），
+             只是缩成右下角一个小窗显示 -->
+        <aside class="float-win assembly-win">
+          <p class="win-title">拼好的矩形</p>
+          <div class="win-body">
+            <canvas id="assembly"></canvas>
+            <p id="assembly-hint" class="hint">点「识别一次」</p>
+          </div>
+        </aside>
+
+        <aside class="float-win camera-win">
+          <p class="win-title">原始画面</p>
+          <div class="win-body">
+            <video id="video" autoplay playsinline muted></video>
+          </div>
+        </aside>
+
+        <div id="placeholder" class="placeholder">
+          <p>尚未开启摄像头</p>
+          <p class="hint">点击左上角「开启摄像头」授权后即可预览画面</p>
+        </div>
+      </div>
+
+      <details id="log-wrap" class="log-wrap hidden">
+        <summary>侧车日志</summary>
+        <pre id="vision-log"></pre>
+      </details>
+    </main>
+
+    <footer class="statusbar">
+      <span id="status">就绪</span>
+      <span class="spacer"></span>
+      <span id="stats"></span>
+    </footer>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

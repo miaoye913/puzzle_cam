@@ -1,0 +1,8 @@
+# 这个项目要在 Windows / Linux / 树莓派上跑，统一按 LF 存进仓库，
+# 免得在 Windows 上编辑过的文件带 CRLF，拿到 Linux 上出问题。
+* text=auto eol=lf
+
+# 这些是二进制，别让 git 去动它们的换行
+*.png binary
+*.jpg binary
+*.ico binary
