@@ -45,6 +45,7 @@ const hostEl = {
   calCalibWait: document.getElementById('cal-calibwait'),
   calCarryDwell: document.getElementById('cal-carrydwell'),
   calSettleDwell: document.getElementById('cal-settledwell'),
+  calGap: document.getElementById('cal-gap'),
   calMoveWait: document.getElementById('cal-movewait'),
   calActionStep: document.getElementById('cal-actionstep'),
   calReadout: document.getElementById('cal-readout'),
@@ -218,11 +219,12 @@ function updateActuatorButtons() {
     button.disabled = !hostConnected || actionRunning
   }
   // 自动拼图：跑起来之后**仍然可点**——那时候它是「停止」。
-  // 平时显示「拼第几块」，一次只走一块，方便一步一步调。
+  // 停在中途之后按钮会写「继续」，因为进度留着，再点一下从断的那块接着拼。
   if (autoRunning) hostEl.autoBtn.textContent = '停止'
   else if (!autoTotal) hostEl.autoBtn.textContent = '自动拼图'
   else if (autoIndex >= autoTotal) hostEl.autoBtn.textContent = `已拼完 ${autoTotal} 块`
-  else hostEl.autoBtn.textContent = `拼第 ${autoIndex + 1}/${autoTotal} 块`
+  else if (autoIndex > 0) hostEl.autoBtn.textContent = `继续（第 ${autoIndex + 1}/${autoTotal} 块）`
+  else hostEl.autoBtn.textContent = '自动拼图'
   hostEl.autoBtn.classList.toggle('stop', autoRunning)
   hostEl.autoBtn.classList.toggle('primary', !autoRunning)
   hostEl.autoBtn.disabled = !hostConnected && !autoRunning
@@ -335,6 +337,52 @@ async function moveAndWait(x, y, label) {
   return true
 }
 
+/**
+ * 搬一块：旋转归零 → 去取 → 吸 → 转到目标姿态 → 去放 → 放（含旋转归零）。
+ *
+ * 返回**整块走完了没有**。中途被「停止」打断就返回 false——那这块不算数，
+ * 进度不往前走，下次还从它开始。每两步之间都看一眼 autoAbort，
+ * 所以停下来时机器一定停在某个动作的边界上，不会卡在半截。
+ */
+async function assembleOnePiece(path, rect) {
+  // 1. 旋转归零：每块都从同一个姿态开始，转角才有确定含义
+  await hostCommand({ cmd: 'set', rot: 0 })
+  hostEl.rotMain.value = '0'
+
+  // 2. 去碎片现在的位置，3. 吸起来
+  const [fx, fy] = boardToPulses(path.from[0], path.from[1], rect[0], rect[1])
+  const from = [Math.round(fx), Math.round(fy)]
+  hostLog(`   去取 #${path.id}：脉冲(${from[0]}, ${from[1]})`)
+  if (await moveAndWait(from[0], from[1], '去取') && !autoAbort) {
+    await runPickPlace('pick')
+    // 吸起来之后停一下再走：`吸` 的最后一步只等到命令被 ACK，舵机这时还没真正升到位，
+    // 不等就转、就走等于拖着碎片蹭。时长在设置页可调。
+    if (!autoAbort) {
+      const dwell = Math.max(0, Math.round(Number(calibration.autoCarryDwellMs) || 0))
+      if (dwell) {
+        hostLog(`   吸住了，停 ${dwell}ms 等舵机升到位`)
+        await sleepAbortable(dwell)
+      }
+    }
+  }
+  if (autoAbort) return false
+
+  // 4. 转到目标姿态（拾取时工具在 0°，所以直接转到 dRot 就是目标姿态）
+  const rot = Math.round(path.dRot)
+  hostLog(`   旋转 → ${rot}°`)
+  await hostCommand({ cmd: 'set', rot })
+  hostEl.rotMain.value = String(rot)
+
+  // 5. 去目标位置，6. 放下（放的过程里会把旋转归零）
+  const [tx, ty] = boardToPulses(path.to[0], path.to[1], rect[0], rect[1])
+  const to = [Math.round(tx), Math.round(ty)]
+  hostLog(`   去放 #${path.id}：脉冲(${to[0]}, ${to[1]})`)
+  if (await moveAndWait(to[0], to[1], '去放') && !autoAbort) {
+    await runPickPlace('place')
+  }
+  return !autoAbort
+}
+
 async function autoAssemble() {
   if (autoRunning) {          // 再点一下 = 停
     autoAbort = true
@@ -348,7 +396,7 @@ async function autoAssemble() {
   const ctx = currentAssemblyMap(lastResult)
   if (!ctx) { hostLog('自动拼图：拿不到板面尺寸，先识别一次'); return }
   const rect = lastResult.board.rect_size
-  const paths = planPaths(lastResult, ctx.map)
+  const paths = planPaths(lastResult, ctx.map, ctx.assembly)
   if (!paths.length) { hostLog('自动拼图：没有可搬运的路径'); return }
 
   if (autoIndex >= paths.length) {
@@ -356,59 +404,26 @@ async function autoAssemble() {
     return
   }
 
-  // **一次只拼一块**：点一下走一块，方便对着日志和画面一步一步调。点完进度自己往前走。
-  const path = paths[autoIndex]
-  const step = autoIndex + 1
+  // **一口气拼完**，中间不停。想中途收手就点「停止」——停在**步与步之间**，
+  // 不会停在半截动作里；进度会留在原地，再点一下从这块接着拼。
   autoRunning = true
   autoAbort = false
   updateActuatorButtons()
-  hostLog(`—— 第 ${step}/${paths.length} 块（#${path.id}）——`)
+  hostLog(`自动拼图：开始，共 ${paths.length} 块`)
   try {
-    // 1. 旋转归零：每轮都从同一个姿态开始，转角才有确定含义
-    await hostCommand({ cmd: 'set', rot: 0 })
-    hostEl.rotMain.value = '0'
-
-    // 2. 去碎片现在的位置，3. 吸起来
-    const [fx, fy] = boardToPulses(path.from[0], path.from[1], rect[0], rect[1])
-    const from = [Math.round(fx), Math.round(fy)]
-    hostLog(`   去取 #${path.id}：脉冲(${from[0]}, ${from[1]})`)
-    if (await moveAndWait(from[0], from[1], '去取') && !autoAbort) {
-      await runPickPlace('pick')
-      // 吸起来之后停一下再走：`吸` 的最后一步只等到命令被 ACK，舵机这时还没真正升到位，
-      // 不等就转、就走等于拖着碎片蹭。时长在设置页可调。
-      if (!autoAbort) {
-        const dwell = Math.max(0, Math.round(Number(calibration.autoCarryDwellMs) || 0))
-        if (dwell) {
-          hostLog(`   吸住了，停 ${dwell}ms 等舵机升到位`)
-          await sleepAbortable(dwell)
-        }
+    while (autoIndex < paths.length && !autoAbort) {
+      const path = paths[autoIndex]
+      const step = autoIndex + 1
+      hostLog(`—— 第 ${step}/${paths.length} 块（#${path.id}）——`)
+      if (!await assembleOnePiece(path, rect)) {
+        hostLog(`自动拼图：已停止（第 ${step} 块没走完，下次还是从这一块开始）`)
+        break
       }
+      autoIndex = step            // 只有整块走完才往前走
+      hostLog(`自动拼图：第 ${step}/${paths.length} 块完成`)
     }
-
-    // 4. 转到目标姿态（拾取时工具在 0°，所以直接转到 dRot 就是目标姿态）
-    if (!autoAbort) {
-      const rot = Math.round(path.dRot)
-      hostLog(`   旋转 → ${rot}°`)
-      await hostCommand({ cmd: 'set', rot })
-      hostEl.rotMain.value = String(rot)
-    }
-
-    // 5. 去目标位置，6. 放下（放的过程里会把旋转归零）
-    if (!autoAbort) {
-      const [tx, ty] = boardToPulses(path.to[0], path.to[1], rect[0], rect[1])
-      const to = [Math.round(tx), Math.round(ty)]
-      hostLog(`   去放 #${path.id}：脉冲(${to[0]}, ${to[1]})`)
-      if (await moveAndWait(to[0], to[1], '去放') && !autoAbort) {
-        await runPickPlace('place')
-      }
-    }
-
-    if (autoAbort) {
-      hostLog(`自动拼图：已停止（第 ${step} 块没走完，下次还是从这一块开始）`)
-    } else {
-      autoIndex = step          // 只有整块走完才往前走
-      hostLog(`自动拼图：第 ${step}/${paths.length} 块完成` +
-              (autoIndex < paths.length ? `，再点一下拼第 ${autoIndex + 1} 块` : '，全部拼完'))
+    if (!autoAbort && autoIndex >= paths.length) {
+      hostLog(`自动拼图：${paths.length} 块全部拼完`)
     }
   } finally {
     autoRunning = false
@@ -439,7 +454,9 @@ function updatePathTable(result) {
   const ctx = result?.board?.found ? currentAssemblyMap(result) : null
   if (!ctx) { autoTotal = 0; reset('还没识别'); return }
   const rect = result.board.rect_size
-  const paths = planPaths(result, ctx.map)
+  // 传 ctx.assembly 而不是 result.assembly：机器要去的目标必须和画面上那个虚线框一致，
+  // 也就是**带间隙**的那份布局
+  const paths = planPaths(result, ctx.map, ctx.assembly)
   if (!paths.length) { autoTotal = 0; reset('没拼出矩形'); return }
 
   // 换了一份识别结果就把自动拼图的进度清零：碎片已经被搬过，旧路径作废了
@@ -531,7 +548,7 @@ const CAL_DEFAULTS = {
   xMin: 500, xMax: 2200, yMin: 2200, yMax: 25100,
   invertX: false, invertY: false, boardW: 297, boardH: 210,
   calibYPulse: 32000, calibSettleMs: 4000,
-  autoMoveMs: 4000, autoCarryDwellMs: 1000, autoSettleMs: 800, actionStepMs: 700,
+  autoMoveMs: 4000, autoCarryDwellMs: 1000, autoSettleMs: 800, actionStepMs: 700, assemblyGapMm: 2,
 }
 
 function fillCalibrationForm() {
@@ -547,6 +564,7 @@ function fillCalibrationForm() {
   hostEl.calCalibWait.value = calibration.calibSettleMs
   hostEl.calCarryDwell.value = calibration.autoCarryDwellMs
   hostEl.calSettleDwell.value = calibration.autoSettleMs
+  hostEl.calGap.value = calibration.assemblyGapMm
   hostEl.calMoveWait.value = calibration.autoMoveMs
   hostEl.calActionStep.value = calibration.actionStepMs
 }
@@ -568,6 +586,7 @@ function applyCalibrationForm() {
   calibration.calibSettleMs = num(hostEl.calCalibWait, calibration.calibSettleMs)
   calibration.autoCarryDwellMs = num(hostEl.calCarryDwell, calibration.autoCarryDwellMs)
   calibration.autoSettleMs = num(hostEl.calSettleDwell, calibration.autoSettleMs)
+  calibration.assemblyGapMm = num(hostEl.calGap, calibration.assemblyGapMm)
   calibration.autoMoveMs = num(hostEl.calMoveWait, calibration.autoMoveMs)
   calibration.actionStepMs = num(hostEl.calActionStep, calibration.actionStepMs)
   saveCalibration()
@@ -683,7 +702,8 @@ function wireHostConsole() {
   // 坐标映射那几个框：改完立刻存下来并重画，不用点「应用」
   for (const input of [hostEl.calXMin, hostEl.calXMax, hostEl.calYMin, hostEl.calYMax,
     hostEl.calBW, hostEl.calBH, hostEl.calCalibY, hostEl.calCalibWait,
-    hostEl.calCarryDwell, hostEl.calSettleDwell, hostEl.calMoveWait, hostEl.calActionStep]) {
+    hostEl.calCarryDwell, hostEl.calSettleDwell, hostEl.calMoveWait, hostEl.calActionStep,
+    hostEl.calGap]) {
     input.addEventListener('change', applyCalibrationForm)
   }
   hostEl.calInvX.addEventListener('change', applyCalibrationForm)

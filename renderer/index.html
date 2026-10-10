@@ -136,6 +136,14 @@
               <input id="cal-bh" class="cal-num" />
               <span class="muted">mm（A4 横向 297×210）</span>
             </div>
+            <!-- 拼好的块之间留的缝。严丝合缝摆的话，机械臂那点定位误差会让后放的碎片
+                 压到先摆好的那块上，设 0 就是严丝合缝 -->
+            <div class="host-row">
+              <label class="host-num">拼图间隙
+                <input id="cal-gap" class="cal-num" /> mm
+              </label>
+              <span class="muted">拼好的块之间留的缝，0 = 严丝合缝</span>
+            </div>
             <div class="host-row">
               <label class="field checkbox"><input type="checkbox" id="cal-invx" /> X 反向</label>
               <label class="field checkbox"><input type="checkbox" id="cal-invy" /> Y 反向</label>

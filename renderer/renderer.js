@@ -418,18 +418,84 @@ function polyCentroid(poly) {
   return poly.reduce((acc, p) => [acc[0] + p[0] / poly.length, acc[1] + p[1] / poly.length], [0, 0])
 }
 
+/** 「拼图间隙」的毫米数 → 拼装坐标的单位数。拼装坐标就是**板面像素**，所以按板子的像素/毫米换算 */
+function assemblyGapUnits(result) {
+  const rect = result?.board?.rect_size
+  const gapMm = Math.max(0, Number(calibration.assemblyGapMm) || 0)
+  if (!rect || !calibration.boardW || !gapMm) return 0
+  return gapMm * (rect[0] / calibration.boardW)
+}
+
+/**
+ * 按「拼图间隙」把拼好的布局撑开一点：**块本身大小不变，只各自往外挪**。
+ *
+ * 做法是绕拼图中心**等比放大各块的位置**（不是把多边形也放大）。等比放大的好处是
+ * 任意两块的间距都按同一个系数涨，跟它们排在哪个方向无关；换成「每块沿径向外推固定
+ * 距离」的话，两块要是正好排在同一个方向上，它们之间反而一点都不会分开。
+ *
+ * 系数按**最近的那一对**定：设最近两块重心相距 d，位置放大到 k 倍之后它们之间正好空出
+ * (k-1)·d（两块都是刚性平移，最近点的连线方向不变）。让它等于设定的间隙，就是
+ * k = 1 + gap/d —— 离得远的那些块自然分得更开。
+ */
+function explodeAssembly(assembly, gapUnits) {
+  const places = assembly?.placements
+  if (!places?.length || !assembly.size || places.length < 2) return assembly
+  if (!(gapUnits > 0)) return assembly
+
+  const centres = places.map((item) => polyCentroid(item.polygon))
+  let nearest = Infinity
+  for (let i = 0; i < centres.length; i++) {
+    for (let j = i + 1; j < centres.length; j++) {
+      nearest = Math.min(nearest, Math.hypot(centres[j][0] - centres[i][0], centres[j][1] - centres[i][1]))
+    }
+  }
+  if (!(nearest > 1e-6)) return assembly   // 两块重心重合，比例算不出来，那就别硬来
+
+  const k = 1 + gapUnits / nearest
+  const cx = assembly.size[0] / 2
+  const cy = assembly.size[1] / 2
+  const moved = places.map((item, i) => {
+    const dx = (k - 1) * (centres[i][0] - cx)
+    const dy = (k - 1) * (centres[i][1] - cy)
+    return { ...item, polygon: item.polygon.map(([x, y]) => [x + dx, y + dy]) }
+  })
+
+  // 撑开之后外框也大了，得重新算——画图和缩放都靠它。顺便把左上角挪回原点，
+  // 下面所有用到坐标的地方都当它是从 0 开始的
+  const xs = moved.flatMap((p) => p.polygon.map(([x]) => x))
+  const ys = moved.flatMap((p) => p.polygon.map(([, y]) => y))
+  const x0 = Math.min(...xs)
+  const y0 = Math.min(...ys)
+  return {
+    ...assembly,
+    placements: moved.map((p) => ({ ...p, polygon: p.polygon.map(([x, y]) => [x - x0, y - y0]) })),
+    size: [Math.max(...xs) - x0, Math.max(...ys) - y0],
+  }
+}
+
+/**
+ * 这份结果对应的**实际要拼成什么样**——原样布局，还是撑开了缝的。
+ *
+ * 只有这一个入口。画图、算虚线框、算机器该去哪儿，全都得走它：
+ * 各算各的话，画面上看着贴在一起、机器却按留了缝的坐标去放，那才叫难查。
+ */
+function currentAssembly(result) {
+  if (!result?.assembly) return null
+  return explodeAssembly(result.assembly, assemblyGapUnits(result))
+}
+
 /**
  * 路径规划：每块碎片从「现在在哪」到「拼好后该在哪」。
  *
- * 两块的位置都用**板面坐标**表示，所以这里算出来的位移和转角是可以直接交给机器去执行的
- * （现在就差一个「板面像素 ↔ 机器脉冲」的换算，那套标定还没做）。
+ * 两块的位置都用**板面坐标**表示，所以这里算出来的位移和转角是可以直接交给机器去执行的。
  *
  * 返回 [{ id, from, to, dx, dy, dist, dRot }]，from/to 是重心。
+ * assembly 默认取撑开过的那个（见 currentAssembly），跟画面上看到的一致。
  */
-function planPaths(result, assemblyMap) {
-  if (!assemblyMap || !result?.assembly?.placements) return []
+function planPaths(result, assemblyMap, assembly = currentAssembly(result)) {
+  if (!assemblyMap || !assembly?.placements) return []
   const paths = []
-  for (const item of result.assembly.placements) {
+  for (const item of assembly.placements) {
     const piece = result.pieces.find((p) => p.id === item.id)
     if (!piece?.polygon_warp || item.polygon.length < 2) continue
     const targetBoard = item.polygon.map(([x, y]) => assemblyMap.toBoard(x, y))
@@ -588,9 +654,10 @@ function currentAssemblyMap(result) {
   if (!rect) return null
   const layout = boardLayout(rect[0], rect[1])
   const dividerX = pickDivider(result).x * layout.scale
-  const map = makeAssemblyMap(result.assembly, layout, dividerX, layout.h)
+  const assembly = currentAssembly(result)
+  const map = makeAssemblyMap(assembly, layout, dividerX, layout.h)
   if (!map) return null
-  return { layout, map }
+  return { layout, map, assembly }
 }
 
 function drawOverlay(result, layout) {
@@ -647,7 +714,7 @@ function drawOverlay(result, layout) {
   // ── 左半「拼图区」：拼好的矩形 ────────────────────────────────
   // 按**和碎片一样的比例**画（1 板面像素 = 1 板面像素），这样两边的块大小能直接对着比；
   // 只有放不下时才缩小。左下角那个浮动小窗里另有一份放大过的，看细节用那个。
-  const assembly = result.assembly
+  const assembly = currentAssembly(result)
   const assemblyMap = makeAssemblyMap(assembly, layout, dx, displayH)
   ctx.save()
   ctx.beginPath()
@@ -719,7 +786,7 @@ function drawOverlay(result, layout) {
   // ── 搬运路径：每块碎片从「现在在哪」连到「拼好后该在哪」 ──────────
   // 画在两个区的裁剪**之外**：线本来就要横跨分界线。
   // 只画线，不做任何运动——离真驱动还差一套「板面像素 ↔ 机器脉冲」的标定。
-  const paths = planPaths(result, assemblyMap)
+  const paths = planPaths(result, assemblyMap, assembly)
   if (paths.length) {
     ctx.save()
     ctx.lineWidth = 1.5
@@ -948,7 +1015,7 @@ function drawAssembly(result) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, availW, availH)
 
-  const assembly = result?.assembly
+  const assembly = currentAssembly(result)
   if (!assembly || !assembly.placements?.length) {
     el.assemblyHint.textContent = result?.board?.found
       ? '这几块没拼出矩形'
