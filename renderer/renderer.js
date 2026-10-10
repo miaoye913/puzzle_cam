@@ -22,16 +22,22 @@ const el = {
 const VISION_JPEG_QUALITY = 0.8
 
 /**
- * 摄像头是架在板子对面的，拍出来的画面左右和实物相反（实物靠右的拍出来在左），
- * 所以要翻一次才是你眼里看到的方向。
+ * 摄像头是**倒着装的**（转了 180°），拍出来的画面和实物整个转了一圈，
+ * 所以要把它转回来，才是你眼里看到的方向。
+ *
+ * **必须是「转 180°」，不能是「左右翻转」。** 这两个差得很远：
+ * 摄像头已经转了 180°，再给它套一个左右翻转，净效果是**上下镜像**；
+ * 而且镜像会把手性翻过来，导致算出来的旋转角**符号整个反掉**。
+ * （实测反馈正是「画面上下镜像 + 角度和机器反了」两个症状一起出现——
+ *   一个左右翻转就能同时造成这两个。）
  *
  * 这一处**同时决定三件事**，改一个地方就全跟着变：
- *   - 抽帧：送进 Python 的帧先翻过来（所以板面图、碎片坐标、拼接结果全都在「你的方向」上）
- *   - 右下角预览小窗：也翻过来，和主画面方向一致
+ *   - 抽帧：送进 Python 的帧先转正（所以板面图、碎片坐标、拼接结果、转角全在「你的方向」上）
+ *   - 右下角预览小窗：也转回来，和主画面方向一致
  *   - 拍照保存：存下来的图也是你看到的方向
- * 哪天摄像头挪到和人在同一侧了，把这里改成 false 就行。
+ * 哪天摄像头正着装回来了，把这里改成 false。
  */
-const CAMERA_FLIP_X = true
+const CAMERA_ROTATE_180 = true
 
 const RESOLUTIONS = [
   { label: '默认', value: '' },
@@ -172,9 +178,10 @@ async function takeSnapshot() {
   canvas.width = videoWidth
   canvas.height = videoHeight
   const ctx = canvas.getContext('2d')
-  if (CAMERA_FLIP_X) {
-    ctx.translate(videoWidth, 0)
-    ctx.scale(-1, 1)
+  if (CAMERA_ROTATE_180) {
+    // 转 180°（不是左右翻转，差别见 CAMERA_ROTATE_180 的说明）
+    ctx.translate(videoWidth, videoHeight)
+    ctx.scale(-1, -1)
   }
   ctx.drawImage(el.video, 0, 0, videoWidth, videoHeight)
 
@@ -259,10 +266,11 @@ async function captureForVision() {
   canvas.width = targetW
   canvas.height = targetH
   const ctx = canvas.getContext('2d')
-  if (CAMERA_FLIP_X) {
-    // 见 CAMERA_FLIP_X 的说明：先翻正，后面 Python 算出来的一切才都在「你的方向」上
-    ctx.translate(targetW, 0)
-    ctx.scale(-1, 1)
+  if (CAMERA_ROTATE_180) {
+    // 见 CAMERA_ROTATE_180 的说明：先转正，后面 Python 算出来的一切
+    //（板面、碎片坐标、转角）才都在「你的方向」上
+    ctx.translate(targetW, targetH)
+    ctx.scale(-1, -1)
   }
   ctx.drawImage(el.video, sx, sy, sw, sh, 0, 0, targetW, targetH)
 
@@ -991,8 +999,8 @@ function initControls() {
   window.addEventListener('resize', renderView)
   window.camAPI.vision.onLog(appendVisionLog)
 
-  // 右下角预览小窗和主画面保持同一方向（见 CAMERA_FLIP_X）
-  el.video.classList.toggle('mirrored', CAMERA_FLIP_X)
+  // 右下角预览小窗和主画面保持同一方向（见 CAMERA_ROTATE_180）
+  el.video.classList.toggle('rotated', CAMERA_ROTATE_180)
   // 注意：不能给 video 加 .hidden——抽帧要从它拿数据，而且右下那个小窗还要显示它
   clearAssembly()
 }

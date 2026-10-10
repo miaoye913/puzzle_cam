@@ -43,6 +43,8 @@ const hostEl = {
   calReset: document.getElementById('cal-reset'),
   calReadout: document.getElementById('cal-readout'),
   calMove: document.getElementById('cal-move'),
+  rotMain: document.getElementById('rot-main'),
+  rotApply: document.getElementById('rot-apply'),
   state: {
     x: document.getElementById('host-sx'),
     y: document.getElementById('host-sy'),
@@ -201,8 +203,9 @@ function updateActuatorButtons() {
   hostEl.emBtn.textContent = actuator.em ? '电磁铁 吸合' : '电磁铁 释放'
   hostEl.servoBtn.disabled = !hostConnected
   hostEl.emBtn.disabled = !hostConnected
-  // 没连上就没得动，所以「点击移动」也一起灰掉
+  // 没连上就没得动，所以「点击移动」和「旋转」也一起灰掉
   hostEl.calMove.disabled = !hostConnected
+  hostEl.rotApply.disabled = !hostConnected
   // 吸/放/一键校准：没连上、或者已经有动作在跑，就按不动
   for (const button of [hostEl.pickBtn, hostEl.placeBtn, hostEl.calibBtn]) {
     button.disabled = !hostConnected || actionRunning
@@ -446,6 +449,17 @@ function wireHostConsole() {
   })
   hostEl.servoBtn.addEventListener('click', () => toggleActuator('servo'))
   hostEl.emBtn.addEventListener('click', () => toggleActuator('em'))
+  // 主界面上填个角度直接转，不用开设置页
+  hostEl.rotApply.addEventListener('click', async () => {
+    const deg = Math.round(Number(hostEl.rotMain.value) || 0)
+    const reply = await hostCommand({ cmd: 'set', rot: deg })
+    if (reply?.ok) {
+      hostEl.rotMain.value = deg
+      hostEl.rot.value = deg        // 和设置页那个框同步，免得两处显示不一样
+      hostLog(`旋转 → ${deg}°`)
+    }
+  })
+
   hostEl.pickBtn.addEventListener('click', () => runPickPlace('pick'))
   hostEl.placeBtn.addEventListener('click', () => runPickPlace('place'))
   hostEl.calibBtn.addEventListener('click', oneClickCalibrate)

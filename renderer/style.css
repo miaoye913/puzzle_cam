@@ -196,8 +196,10 @@ video {
   background: #000;
 }
 
-video.mirrored {
-  transform: scaleX(-1);
+/* 摄像头倒着装的，预览小窗也要跟着转回来。
+   注意是「转 180°」而不是 scaleX(-1)——两者差一个上下镜像，详见 renderer.js */
+video.rotated {
+  transform: rotate(180deg);
 }
 
 video.hidden {
@@ -355,6 +357,11 @@ video.hidden {
   font-size: 12px;
   color: var(--muted);
   white-space: nowrap;
+}
+
+/* 放在工具栏上时别自动撑开，按内容宽就行 */
+.toolbar .host-num {
+  flex: 0 0 auto;
 }
 
 .host-num input {
