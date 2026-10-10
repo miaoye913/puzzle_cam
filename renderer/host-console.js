@@ -45,6 +45,7 @@ const hostEl = {
   calMove: document.getElementById('cal-move'),
   rotMain: document.getElementById('rot-main'),
   rotApply: document.getElementById('rot-apply'),
+  autoBtn: document.getElementById('act-auto'),
   state: {
     x: document.getElementById('host-sx'),
     y: document.getElementById('host-sy'),
@@ -210,6 +211,11 @@ function updateActuatorButtons() {
   for (const button of [hostEl.pickBtn, hostEl.placeBtn, hostEl.calibBtn]) {
     button.disabled = !hostConnected || actionRunning
   }
+  // 自动拼图：跑起来之后**仍然可点**——那时候它是「停止」
+  hostEl.autoBtn.textContent = autoRunning ? '停止' : '自动拼图'
+  hostEl.autoBtn.classList.toggle('stop', autoRunning)
+  hostEl.autoBtn.classList.toggle('primary', !autoRunning)
+  hostEl.autoBtn.disabled = !hostConnected && !autoRunning
   // 连接状态放在主界面上：连接按钮搬到设置页了，不看一眼设置页也得知道连没连上
   hostEl.connStatus.textContent = hostConnected
     ? `已连接 · ${hostEl.port.value.trim() || '串口'}`
@@ -228,7 +234,11 @@ async function runPickPlace(action) {
     const steps = [
       { servo: SERVO_DOWN, text: '舵机放下' },
       { em: isPick ? 1 : 0, text: isPick ? '电磁铁吸合' : '电磁铁释放' },
-      { servo: SERVO_UP, text: '舵机升起' },
+      // 放的时候最后一步**顺便把旋转归零**：碎片已经放下、工具是空的，转起来不会蹭到东西。
+      // 一条命令带两个字段，不额外占时间（整个动作仍然约 1.45 秒）。
+      // 这一步也是自动拼图能成立的前提——每轮都从「旋转 0」开始，下一块拾取时的姿态才是确定的。
+      isPick ? { servo: SERVO_UP, text: '舵机升起' }
+             : { servo: SERVO_UP, rot: 0, text: '舵机升起，旋转归零' },
     ]
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i]
@@ -236,9 +246,14 @@ async function runPickPlace(action) {
       if (step.servo !== undefined) {
         payload.servo = step.servo
         actuator.servo = step.servo === 1
-      } else {
+      }
+      if (step.em !== undefined) {
         payload.em = step.em
         actuator.em = step.em === 1
+      }
+      if (step.rot !== undefined) {
+        payload.rot = step.rot
+        hostEl.rotMain.value = String(step.rot)
       }
       updateActuatorButtons()
       hostLog(`${name} ${i + 1}/${steps.length}：${step.text}`)
@@ -253,6 +268,116 @@ async function runPickPlace(action) {
     hostLog(`${name} 完成`)
   } finally {
     actionRunning = false
+    updateActuatorButtons()
+  }
+}
+
+// ── 自动拼图 ────────────────────────────────────────────────────────
+// 对每一块碎片走一遍：旋转归零 → 去取 → 吸 → 转到目标姿态 → 去放 → 放（含旋转归零）
+const AUTO_MOVE_TIMEOUT_MS = 8000   // 单次移动最多等这么久，等不到就往下走
+const AUTO_POLL_MS = 250            // 轮询机器位置的间隔
+const AUTO_POS_TOL = 30             // 脉冲；判「到位」的容差
+const AUTO_SETTLE_MS = 2500         // 位置报不回来时，退化成固定等待
+
+let autoRunning = false
+let autoAbort = false
+// null = 还没试出来；false = 试过了发现位置对不上，后面就别白等了
+let autoPollWorks = null
+
+/**
+ * 发一条移动命令，然后等它到位。
+ *
+ * 优先轮询机器报的位置；万一报的不是真实位置（协议说明里 posX/posY 是「上电找零后为 0、
+ * **只增不减**」的逻辑坐标，有可能对不上目标值），第一次等超时就改成固定等待，
+ * 免得每一步都白等 8 秒。
+ */
+async function moveAndWait(x, y, label) {
+  const reply = await hostCommand({ cmd: 'set', x, y })
+  if (!reply?.ok) return false
+  if (autoPollWorks === false) {
+    await sleep(AUTO_SETTLE_MS)
+    return true
+  }
+  const deadline = performance.now() + AUTO_MOVE_TIMEOUT_MS
+  while (performance.now() < deadline) {
+    if (autoAbort) return true
+    await sleep(AUTO_POLL_MS)
+    // 注意：hostCommand 已经把 IPC 那层 {ok, reply} 拆掉了，直接就是回复本身。
+    // 这里多写一层 .reply 的话永远是 undefined，就会变成「每次都等满超时」。
+    const status = (await hostCommand({ cmd: 'get_all' }))?.status
+    if (status && Math.abs(status.posX - x) <= AUTO_POS_TOL &&
+        Math.abs(status.posY - y) <= AUTO_POS_TOL) {
+      autoPollWorks = true
+      return true
+    }
+  }
+  if (autoPollWorks === null) {
+    autoPollWorks = false
+    hostLog('位置一直对不上目标值（协议说明里 posX/posY 是「只增不减」的逻辑坐标），' +
+            `后面改成按固定时间等 ${AUTO_SETTLE_MS}ms`)
+  } else {
+    hostLog(`${label}：等到位超时，继续往下走`)
+  }
+  return true
+}
+
+async function autoAssemble() {
+  if (autoRunning) {          // 再点一下 = 停
+    autoAbort = true
+    hostLog('自动拼图：收到停止，走完当前这步就停')
+    return
+  }
+  if (!hostConnected) { hostLog('自动拼图：还没连上机器（去设置页连一下）'); return }
+  if (!lastResult?.board?.found) { hostLog('自动拼图：还没有识别结果，先点「识别一次」'); return }
+  if (!lastResult.assembly) { hostLog('自动拼图：这几块没拼出矩形，没得拼'); return }
+
+  const ctx = currentAssemblyMap(lastResult)
+  if (!ctx) { hostLog('自动拼图：拿不到板面尺寸，先识别一次'); return }
+  const rect = lastResult.board.rect_size
+  const paths = planPaths(lastResult, ctx.map)
+  if (!paths.length) { hostLog('自动拼图：没有可搬运的路径'); return }
+
+  autoRunning = true
+  autoAbort = false
+  autoPollWorks = null
+  updateActuatorButtons()
+  hostLog(`自动拼图：共 ${paths.length} 块，开始`)
+  try {
+    for (let i = 0; i < paths.length; i++) {
+      const path = paths[i]
+      if (autoAbort) { hostLog(`自动拼图：在第 ${i + 1} 块之前停下`); break }
+      hostLog(`—— 第 ${i + 1}/${paths.length} 块（#${path.id}）——`)
+
+      // 1. 旋转归零：每轮都从同一个姿态开始，转角才有确定含义
+      await hostCommand({ cmd: 'set', rot: 0 })
+      hostEl.rotMain.value = '0'
+
+      // 2. 去碎片现在的位置，3. 吸起来
+      const [fx, fy] = boardToPulses(path.from[0], path.from[1], rect[0], rect[1])
+      const from = [Math.round(fx), Math.round(fy)]
+      hostLog(`   去取 #${path.id}：脉冲(${from[0]}, ${from[1]})`)
+      if (!(await moveAndWait(from[0], from[1], '去取'))) { hostLog('   移动没发出去，停'); break }
+      if (autoAbort) break
+      await runPickPlace('pick')
+
+      // 4. 转到目标姿态（拾取时工具在 0°，所以直接转到 dRot 就是目标姿态）
+      const rot = Math.round(path.dRot)
+      hostLog(`   旋转 → ${rot}°`)
+      await hostCommand({ cmd: 'set', rot })
+      hostEl.rotMain.value = String(rot)
+
+      // 5. 去目标位置，6. 放下（放的过程里会把旋转归零）
+      const [tx, ty] = boardToPulses(path.to[0], path.to[1], rect[0], rect[1])
+      const to = [Math.round(tx), Math.round(ty)]
+      hostLog(`   去放 #${path.id}：脉冲(${to[0]}, ${to[1]})`)
+      if (!(await moveAndWait(to[0], to[1], '去放'))) { hostLog('   移动没发出去，停'); break }
+      if (autoAbort) break
+      await runPickPlace('place')
+    }
+    hostLog(autoAbort ? '自动拼图：已停止' : '自动拼图：完成')
+  } finally {
+    autoRunning = false
+    autoAbort = false
     updateActuatorButtons()
   }
 }
@@ -463,6 +588,7 @@ function wireHostConsole() {
   hostEl.pickBtn.addEventListener('click', () => runPickPlace('pick'))
   hostEl.placeBtn.addEventListener('click', () => runPickPlace('place'))
   hostEl.calibBtn.addEventListener('click', oneClickCalibrate)
+  hostEl.autoBtn.addEventListener('click', autoAssemble)
 
   el.board.addEventListener('click', onBoardClick)
   // 「点击移动」现在是开关按钮（原来是设置页里的复选框）——操作时随时要切，

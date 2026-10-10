@@ -575,6 +575,22 @@ function drawMachineMarker(ctx, rectW, rectH, layout) {
   ctx.restore()
 }
 
+/**
+ * 当前这份结果对应的「拼装映射」。
+ *
+ * drawOverlay 画虚线目标框用它，自动拼图算「机器该去哪儿」也用它——
+ * **必须是同一个**：各算各的，迟早会分家，那才叫难查。
+ */
+function currentAssemblyMap(result) {
+  const rect = result?.board?.rect_size
+  if (!rect) return null
+  const layout = boardLayout(rect[0], rect[1])
+  const dividerX = pickDivider(result).x * layout.scale
+  const map = makeAssemblyMap(result.assembly, layout, dividerX, layout.h)
+  if (!map) return null
+  return { layout, map }
+}
+
 function drawOverlay(result, layout) {
   const canvas = el.overlay
   if (!result || !layout) {
