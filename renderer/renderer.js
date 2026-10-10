@@ -374,6 +374,88 @@ function pickDivider(result) {
   return { x: boardW / 2, fromLine: false, lineId: null }
 }
 
+/**
+ * 拼好的矩形摆在左半区的哪儿，以及它和板面坐标怎么换算。
+ *
+ * 按**和碎片一样的比例**摆（1 板面像素 = 1 板面像素），这样两边的块大小能直接对着比；
+ * 只有放不下时才缩小。toBoard 是给路径规划用的——终点得落在**板面坐标**上，
+ * 以后要真去驱动机器，用的就是这套坐标。
+ */
+function makeAssemblyMap(assembly, layout, zoneW, zoneH) {
+  if (!assembly?.placements?.length || !assembly.size) return null
+  const [aw, ah] = assembly.size
+  const margin = 18
+  const fit = Math.min(
+    layout.scale,                                     // 和碎片同比例
+    Math.max(1, zoneW - margin * 2) / Math.max(aw, 1), // 放不下才缩
+    Math.max(1, zoneH - margin * 2) / Math.max(ah, 1),
+  )
+  const w = aw * fit
+  const h = ah * fit
+  const ox = (zoneW - w) / 2
+  const oy = Math.max(margin + 12, (zoneH - h) / 2)
+  return {
+    fit,
+    ox,
+    oy,
+    // 拼装坐标 → 画布像素
+    toCanvas: (x, y) => [ox + x * fit, oy + y * fit],
+    // 拼装坐标 → 板面坐标
+    toBoard: (x, y) => [(ox + x * fit) / layout.scale, (oy + y * fit) / layout.scale],
+  }
+}
+
+/** 多边形的重心（顶点平均，够用了；这里只要一个稳定的代表点） */
+function polyCentroid(poly) {
+  return poly.reduce((acc, p) => [acc[0] + p[0] / poly.length, acc[1] + p[1] / poly.length], [0, 0])
+}
+
+/** 第 0 条边的方向角，用来算「这块要转多少度」 */
+function polyAngle(poly) {
+  return Math.atan2(poly[1][1] - poly[0][1], poly[1][0] - poly[0][0])
+}
+
+function normDeg(deg) {
+  let d = deg % 360
+  if (d > 180) d -= 360
+  if (d < -180) d += 360
+  return d
+}
+
+/**
+ * 路径规划：每块碎片从「现在在哪」到「拼好后该在哪」。
+ *
+ * 两块的位置都用**板面坐标**表示，所以这里算出来的位移和转角是可以直接交给机器去执行的
+ * （现在就差一个「板面像素 ↔ 机器脉冲」的换算，那套标定还没做）。
+ *
+ * 返回 [{ id, from, to, dx, dy, dist, dRot }]，from/to 是重心。
+ */
+function planPaths(result, assemblyMap) {
+  if (!assemblyMap || !result?.assembly?.placements) return []
+  const paths = []
+  for (const item of result.assembly.placements) {
+    const piece = result.pieces.find((p) => p.id === item.id)
+    if (!piece?.polygon_warp || item.polygon.length < 2) continue
+    const targetBoard = item.polygon.map(([x, y]) => assemblyMap.toBoard(x, y))
+    const from = polyCentroid(piece.polygon_warp)
+    const to = polyCentroid(targetBoard)
+    const dRot = normDeg(
+      (polyAngle(targetBoard) - polyAngle(piece.polygon_warp)) * 180 / Math.PI,
+    )
+    paths.push({
+      id: item.id,
+      from,
+      to,
+      dx: to[0] - from[0],
+      dy: to[1] - from[1],
+      dist: Math.hypot(to[0] - from[0], to[1] - from[1]),
+      dRot,
+      targetPolygon: targetBoard,
+    })
+  }
+  return paths
+}
+
 function drawOverlay(result, layout) {
   const canvas = el.overlay
   if (!result || !layout) {
@@ -426,27 +508,16 @@ function drawOverlay(result, layout) {
   // 按**和碎片一样的比例**画（1 板面像素 = 1 板面像素），这样两边的块大小能直接对着比；
   // 只有放不下时才缩小。左下角那个浮动小窗里另有一份放大过的，看细节用那个。
   const assembly = result.assembly
+  const assemblyMap = makeAssemblyMap(assembly, layout, dx, displayH)
   ctx.save()
   ctx.beginPath()
   ctx.rect(0, 0, dx, displayH)
   ctx.clip()
-  if (assembly?.placements?.length && assembly.size) {
-    const [aw, ah] = assembly.size
-    const margin = 18
-    const fit = Math.min(
-      layout.scale,                                    // 和碎片同比例
-      Math.max(1, dx - margin * 2) / Math.max(aw, 1),   // 放不下才缩
-      Math.max(1, displayH - margin * 2) / Math.max(ah, 1),
-    )
-    const w = aw * fit
-    const h = ah * fit
-    const ox = (dx - w) / 2
-    const oy = Math.max(margin + 12, (displayH - h) / 2)
+  if (assemblyMap) {
     assembly.placements.forEach((item, index) => {
       ctx.beginPath()
       item.polygon.forEach(([x, y], i) => {
-        const px = ox + x * fit
-        const py = oy + y * fit
+        const [px, py] = assemblyMap.toCanvas(x, y)
         if (i) ctx.lineTo(px, py)
         else ctx.moveTo(px, py)
       })
@@ -460,7 +531,8 @@ function drawOverlay(result, layout) {
     })
     ctx.font = '600 12px "Segoe UI", "Microsoft YaHei", sans-serif'
     ctx.fillStyle = '#8b9bb4'
-    ctx.fillText(`拼好 ${aw.toFixed(0)}×${ah.toFixed(0)}`, ox, oy - 8)
+    ctx.fillText(`拼好 ${assembly.size[0].toFixed(0)}×${assembly.size[1].toFixed(0)}`,
+      assemblyMap.ox, assemblyMap.oy - 8)
   } else {
     ctx.font = '600 13px "Segoe UI", "Microsoft YaHei", sans-serif'
     ctx.textAlign = 'center'
@@ -504,6 +576,68 @@ function drawOverlay(result, layout) {
   }
   ctx.restore()   // 结束「识别区」的裁剪
 
+  // ── 搬运路径：每块碎片从「现在在哪」连到「拼好后该在哪」 ──────────
+  // 画在两个区的裁剪**之外**：线本来就要横跨分界线。
+  // 只画线，不做任何运动——离真驱动还差一套「板面像素 ↔ 机器脉冲」的标定。
+  const paths = planPaths(result, assemblyMap)
+  if (paths.length) {
+    ctx.save()
+    ctx.lineWidth = 1.5
+    ctx.strokeStyle = PATH_COLOR
+    ctx.fillStyle = PATH_COLOR
+    for (const path of paths) {
+      const [x0, y0] = project(path.from[0], path.from[1])
+      const [x1, y1] = project(path.to[0], path.to[1])
+
+      // 目标位置画一圈虚线框：一眼看出这块要落到哪儿、转成什么姿态
+      ctx.save()
+      ctx.setLineDash([4, 4])
+      ctx.globalAlpha = 0.75
+      ctx.beginPath()
+      path.targetPolygon.forEach(([bx, by], i) => {
+        const [px, py] = project(bx, by)
+        if (i) ctx.lineTo(px, py)
+        else ctx.moveTo(px, py)
+      })
+      ctx.closePath()
+      ctx.stroke()
+      ctx.restore()
+
+      // 起点那个小圈表示「从这儿搬走」
+      ctx.beginPath()
+      ctx.arc(x0, y0, 3, 0, Math.PI * 2)
+      ctx.stroke()
+
+      // 连线 + 箭头
+      ctx.beginPath()
+      ctx.moveTo(x0, y0)
+      ctx.lineTo(x1, y1)
+      ctx.stroke()
+      const angle = Math.atan2(y1 - y0, x1 - x0)
+      const head = 9
+      ctx.beginPath()
+      ctx.moveTo(x1, y1)
+      ctx.lineTo(x1 - head * Math.cos(angle - 0.4), y1 - head * Math.sin(angle - 0.4))
+      ctx.lineTo(x1 - head * Math.cos(angle + 0.4), y1 - head * Math.sin(angle + 0.4))
+      ctx.closePath()
+      ctx.fill()
+
+      // 标一下这块要转多少度——光看一条线看不出转角
+      const mx = (x0 + x1) / 2
+      const my = (y0 + y1) / 2
+      const text = `#${path.id}  ${path.dRot >= 0 ? '+' : ''}${path.dRot.toFixed(0)}°`
+      ctx.font = '600 12px "Segoe UI", "Microsoft YaHei", sans-serif'
+      ctx.lineWidth = 3
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)'
+      ctx.strokeText(text, mx + 6, my - 4)
+      ctx.fillStyle = PATH_COLOR
+      ctx.fillText(text, mx + 6, my - 4)
+      ctx.lineWidth = 1.5
+      ctx.strokeStyle = PATH_COLOR
+    }
+    ctx.restore()
+  }
+
   // ── 板面上的线条：按**实测颜色**画（红线、记号笔、拼缝都适用）。
   // 当分界线用的那条已经画成分区线了，这里只标一下它的颜色，不重复描一遍。
   for (const line of result.lines ?? []) {
@@ -546,6 +680,9 @@ function drawOverlay(result, layout) {
 // 拼好的矩形里每块碎片的配色。拼图区那张大图和左下角的小窗共用同一套，
 // 同一块在两处颜色一致，对照着看不会串
 const ASSEMBLY_COLORS = ['#4c8dff', '#3ddc97', '#ffb454', '#ff6b9d', '#b98cff', '#5ad1e6']
+
+// 搬运路径的颜色。特意选个暖色，和碎片的洋红、拼好的矩形的蓝/绿/橙区分开
+const PATH_COLOR = '#ffd166'
 
 function visionStatsText(result) {
   const now = performance.now()
