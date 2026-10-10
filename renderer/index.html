@@ -147,12 +147,20 @@
               <label class="host-num">校准位移 Y <input id="cal-caliby" class="cal-num" /></label>
               <label class="host-num">等待 <input id="cal-calibwait" class="cal-num" /> ms</label>
             </div>
-            <!-- 两处停留：走到位了先停稳再动舵机；吸起来了先停一下再走 -->
+            <!-- 下面三个按**实际顺序**排：先等机器走完，再等它停稳，最后才是动作。
+                 第一个不是从机器那儿问来的——协议里 posX/posY 是命令寄存器，
+                 命令一发就等于目标值，拿它判「到位」永远判「到了」 -->
+            <div class="host-row">
+              <label class="host-num">移动等待
+                <input id="cal-movewait" class="cal-num" /> ms
+              </label>
+              <span class="muted">命令发出后，等机器走完（拍时间，机器没到就调大）</span>
+            </div>
             <div class="host-row">
               <label class="host-num">到位停留
                 <input id="cal-settledwell" class="cal-num" /> ms
               </label>
-              <span class="muted">走到位后、动舵机前</span>
+              <span class="muted">走完后、动舵机前，等它停稳</span>
             </div>
             <div class="host-row">
               <label class="host-num">搬运停留

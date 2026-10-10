@@ -45,6 +45,7 @@ const hostEl = {
   calCalibWait: document.getElementById('cal-calibwait'),
   calCarryDwell: document.getElementById('cal-carrydwell'),
   calSettleDwell: document.getElementById('cal-settledwell'),
+  calMoveWait: document.getElementById('cal-movewait'),
   calActionStep: document.getElementById('cal-actionstep'),
   calReadout: document.getElementById('cal-readout'),
   calMove: document.getElementById('cal-move'),
@@ -283,10 +284,6 @@ async function runPickPlace(action) {
 
 // ── 自动拼图 ────────────────────────────────────────────────────────
 // 对每一块碎片走一遍：旋转归零 → 去取 → 吸 → 转到目标姿态 → 去放 → 放（含旋转归零）
-const AUTO_MOVE_TIMEOUT_MS = 8000   // 单次移动最多等这么久，等不到就往下走
-const AUTO_POLL_MS = 250            // 轮询机器位置的间隔
-const AUTO_POS_TOL = 30             // 脉冲；判「到位」的容差
-const AUTO_MOVE_FALLBACK_MS = 2500  // 位置报不回来时，退化成固定等待
 
 let autoRunning = false
 let autoAbort = false
@@ -295,57 +292,45 @@ let autoAbort = false
 let autoIndex = 0
 let autoTotal = 0
 let autoResult = null
-// null = 还没试出来；false = 试过了发现位置对不上，后面就别白等了
-let autoPollWorks = null
+
+/** 可被打断的等待：点了「停止」不该还傻等剩下的几秒 */
+async function sleepAbortable(ms) {
+  const deadline = performance.now() + ms
+  let left = deadline - performance.now()
+  while (!autoAbort && left > 0) {
+    await sleep(Math.min(100, left))
+    left = deadline - performance.now()
+  }
+}
 
 /**
- * 发一条移动命令，然后等它到位。
+ * 发一条移动命令，等机器走完，再停一下。
  *
- * 优先轮询机器报的位置；万一报的不是真实位置（协议说明里 posX/posY 是「上电找零后为 0、
- * **只增不减**」的逻辑坐标，有可能对不上目标值），第一次等超时就改成固定等待，
- * 免得每一步都白等 8 秒。
+ * **只看时间，不问机器**。以前这里轮询 get_all 判「到位」，那是错的：协议里的
+ * posX/posY 是**命令寄存器**，命令一发下去它就等于目标值了，跟机器实际走到哪没关系——
+ * 所以第一次轮询就「判到位」，整个等待只剩一次轮询的时间，动作在机器还在路上时就下去了。
+ * 实测反馈「一边停一边放」「后面的连吸都没停就吸」都是它。
+ *
+ * 现在是固定的两段，顺序执行，**每一块、每一步都一模一样**：
+ *
+ *   发命令 → 等「移动等待」估它走完 → 停「到位停留」等它停稳 → 交回调用方做动作
+ *
+ * 两个值都在设置页里可调。机器还没走到就把「移动等待」调大。
  */
 async function moveAndWait(x, y, label) {
   const reply = await hostCommand({ cmd: 'set', x, y })
   if (!reply?.ok) return false
 
-  if (autoPollWorks === false) {
-    // 位置报不回来，只能按固定时间估
-    await sleep(AUTO_MOVE_FALLBACK_MS)
-  } else {
-    const deadline = performance.now() + AUTO_MOVE_TIMEOUT_MS
-    let arrived = false
-    while (performance.now() < deadline) {
-      if (autoAbort) break
-      await sleep(AUTO_POLL_MS)
-      // 注意：hostCommand 已经把 IPC 那层 {ok, reply} 拆掉了，直接就是回复本身。
-      // 这里多写一层 .reply 的话永远是 undefined，就会变成「每次都等满超时」。
-      const status = (await hostCommand({ cmd: 'get_all' }))?.status
-      if (status && Math.abs(status.posX - x) <= AUTO_POS_TOL &&
-          Math.abs(status.posY - y) <= AUTO_POS_TOL) {
-        autoPollWorks = true
-        arrived = true
-        break
-      }
-    }
-    if (!arrived) {
-      if (autoPollWorks === null) {
-        autoPollWorks = false
-        hostLog('位置一直对不上目标值（协议说明里 posX/posY 是「只增不减」的逻辑坐标），' +
-                `后面改成按固定时间等 ${AUTO_MOVE_FALLBACK_MS}ms`)
-      } else {
-        hostLog(`${label}：等到位超时，继续往下走`)
-      }
-    }
+  const travel = Math.max(0, Math.round(Number(calibration.autoMoveMs) || 0))
+  if (travel) {
+    hostLog(`   ${label}：命令已发，等 ${travel}ms 走完`)
+    await sleepAbortable(travel)
   }
 
-  // 到位之后再停一下才动舵机。
-  // 位置对上**不等于**机器停稳了——还在晃、还在收尾。马上降/升舵机会蹭到碎片。
-  // 时长在设置页「到位停留」里可调。
   const settle = Math.max(0, Math.round(Number(calibration.autoSettleMs) || 0))
   if (settle && !autoAbort) {
     hostLog(`   ${label}到位，停 ${settle}ms 等停稳`)
-    await sleep(settle)
+    await sleepAbortable(settle)
   }
   return true
 }
@@ -376,7 +361,6 @@ async function autoAssemble() {
   const step = autoIndex + 1
   autoRunning = true
   autoAbort = false
-  autoPollWorks = null
   updateActuatorButtons()
   hostLog(`—— 第 ${step}/${paths.length} 块（#${path.id}）——`)
   try {
@@ -396,7 +380,7 @@ async function autoAssemble() {
         const dwell = Math.max(0, Math.round(Number(calibration.autoCarryDwellMs) || 0))
         if (dwell) {
           hostLog(`   吸住了，停 ${dwell}ms 等舵机升到位`)
-          await sleep(dwell)
+          await sleepAbortable(dwell)
         }
       }
     }
@@ -546,7 +530,8 @@ async function toggleActuator(which) {
 const CAL_DEFAULTS = {
   xMin: 500, xMax: 2200, yMin: 2200, yMax: 25100,
   invertX: false, invertY: false, boardW: 297, boardH: 210,
-  calibYPulse: 32000, calibSettleMs: 4000, autoCarryDwellMs: 1000, autoSettleMs: 800, actionStepMs: 700,
+  calibYPulse: 32000, calibSettleMs: 4000,
+  autoMoveMs: 4000, autoCarryDwellMs: 1000, autoSettleMs: 800, actionStepMs: 700,
 }
 
 function fillCalibrationForm() {
@@ -562,6 +547,7 @@ function fillCalibrationForm() {
   hostEl.calCalibWait.value = calibration.calibSettleMs
   hostEl.calCarryDwell.value = calibration.autoCarryDwellMs
   hostEl.calSettleDwell.value = calibration.autoSettleMs
+  hostEl.calMoveWait.value = calibration.autoMoveMs
   hostEl.calActionStep.value = calibration.actionStepMs
 }
 
@@ -582,6 +568,7 @@ function applyCalibrationForm() {
   calibration.calibSettleMs = num(hostEl.calCalibWait, calibration.calibSettleMs)
   calibration.autoCarryDwellMs = num(hostEl.calCarryDwell, calibration.autoCarryDwellMs)
   calibration.autoSettleMs = num(hostEl.calSettleDwell, calibration.autoSettleMs)
+  calibration.autoMoveMs = num(hostEl.calMoveWait, calibration.autoMoveMs)
   calibration.actionStepMs = num(hostEl.calActionStep, calibration.actionStepMs)
   saveCalibration()
   renderView()          // 网格刻度和准星都跟着范围变，立刻重画
@@ -696,7 +683,7 @@ function wireHostConsole() {
   // 坐标映射那几个框：改完立刻存下来并重画，不用点「应用」
   for (const input of [hostEl.calXMin, hostEl.calXMax, hostEl.calYMin, hostEl.calYMax,
     hostEl.calBW, hostEl.calBH, hostEl.calCalibY, hostEl.calCalibWait,
-    hostEl.calCarryDwell, hostEl.calSettleDwell, hostEl.calActionStep]) {
+    hostEl.calCarryDwell, hostEl.calSettleDwell, hostEl.calMoveWait, hostEl.calActionStep]) {
     input.addEventListener('change', applyCalibrationForm)
   }
   hostEl.calInvX.addEventListener('change', applyCalibrationForm)
