@@ -8,9 +8,10 @@
  * 所以旁边的实时状态是靠周期 GET ALL 刷出来的，不要拿 ACK 当完成。
  */
 const hostEl = {
-  toggle: document.getElementById('host-toggle'),
-  panel: document.getElementById('host-panel'),
-  close: document.getElementById('host-close'),
+  settingsToggle: document.getElementById('settings-toggle'),
+  settings: document.getElementById('settings'),
+  settingsClose: document.getElementById('settings-close'),
+  connStatus: document.getElementById('host-status'),
   port: document.getElementById('host-port'),
   portList: document.getElementById('host-port-list'),
   refresh: document.getElementById('host-refresh'),
@@ -109,6 +110,7 @@ function showStatus(status) {
   hostEl.state.servo.textContent = status.servo ? '开' : '关'
   hostEl.state.em.textContent = status.electromagnet ? '吸合' : '释放'
   // 工具栏上那两个开关跟着机器实际状态走——比如机器自己复位了，按钮不该还显示「开」
+  if (performance.now() < actuatorGuardUntil) return   // 刚下发过：这条状态可能是过时的
   const next = { servo: !!status.servo, em: !!status.electromagnet }
   if (next.servo !== actuator.servo || next.em !== actuator.em) {
     Object.assign(actuator, next)
@@ -161,8 +163,17 @@ async function sendSettings() {
 }
 
 // ── 舵机 / 电磁铁：工具栏上的常驻开关 ───────────────────────────────
-// 放在控制台外面，是因为这两个是操作过程中要随手按的，不该先展开面板才能碰
+// 操作过程中要随手按的，所以放在工具栏上，不在设置页里
 const actuator = { servo: false, em: false }
+
+// 刚下发过的执行器，这么长时间内不拿 status 事件去覆盖按钮。
+//
+// 为什么需要它：机器状态是「查回来的」，一次查询的响应事件可能比我们随后的点击**到得还晚**
+// （实测踩到过：点两下关掉，机器确实关了，按钮却弹回「开」）。那条事件带的是点击**之前**
+// 的旧状态，它没有错，只是过时了。隔一小段时间不看它，按钮就不会被翻回去。
+// 开着自动轮询时，新状态一两秒内就会自己回来，正好接上。
+let actuatorGuardUntil = 0
+const ACTUATOR_GUARD_MS = 1200
 
 // ── 吸 / 放：把「舵机放下 + 电磁铁 + 舵机升起」合成一个动作 ──────────
 // 吸：舵机放下 → 电磁铁吸合 → 舵机升起
@@ -190,10 +201,17 @@ function updateActuatorButtons() {
   hostEl.emBtn.textContent = actuator.em ? '电磁铁 吸合' : '电磁铁 释放'
   hostEl.servoBtn.disabled = !hostConnected
   hostEl.emBtn.disabled = !hostConnected
+  // 没连上就没得动，所以「点击移动」也一起灰掉
+  hostEl.calMove.disabled = !hostConnected
   // 吸/放/一键校准：没连上、或者已经有动作在跑，就按不动
   for (const button of [hostEl.pickBtn, hostEl.placeBtn, hostEl.calibBtn]) {
     button.disabled = !hostConnected || actionRunning
   }
+  // 连接状态放在主界面上：连接按钮搬到设置页了，不看一眼设置页也得知道连没连上
+  hostEl.connStatus.textContent = hostConnected
+    ? `已连接 · ${hostEl.port.value.trim() || '串口'}`
+    : '未连接'
+  hostEl.connStatus.classList.toggle('ok', hostConnected)
 }
 
 /** 吸或放：一整串动作当成一件事来做，中途失败就停在那儿并说明原因 */
@@ -226,6 +244,7 @@ async function runPickPlace(action) {
         hostLog(`${name} 中断在第 ${i + 1} 步（${step.text}）`)
         return
       }
+      actuatorGuardUntil = performance.now() + ACTUATOR_GUARD_MS
       if (i < steps.length - 1) await sleep(ACTION_STEP_MS)
     }
     hostLog(`${name} 完成`)
@@ -269,6 +288,7 @@ async function toggleActuator(which) {
     updateActuatorButtons()
     return
   }
+  actuatorGuardUntil = performance.now() + ACTUATOR_GUARD_MS
   hostLog(`${which === 'servo' ? '舵机' : '电磁铁'} → ${next ? '开' : '关'}`)
 }
 
@@ -341,8 +361,11 @@ function onMachinePose(status) {
  * **默认关着**（面板里那个勾）：这是会动真硬件的操作，误点一下机器就跑了，
  * 所以要有意勾上才生效。
  */
+/** 「点击移动」是个开关按钮，开着的标志是 .active（原来是复选框的 .checked） */
+const moveArmed = () => hostEl.calMove.classList.contains('active')
+
 function onBoardClick(event) {
-  if (!hostEl.calMove.checked) return
+  if (!moveArmed()) return
   const rect = lastResult?.board?.rect_size
   if (!rect) {
     hostLog('还没有识别结果，先点「识别一次」')
@@ -374,9 +397,10 @@ function onBoardClick(event) {
 }
 
 function wireHostConsole() {
-  hostEl.toggle.addEventListener('click', async () => {
-    const willShow = hostEl.panel.classList.contains('hidden')
-    hostEl.panel.classList.toggle('hidden', !willShow)
+  hostEl.settingsToggle.addEventListener('click', async () => {
+    const willShow = hostEl.settings.classList.contains('hidden')
+    hostEl.settings.classList.toggle('hidden', !willShow)
+    hostEl.settingsToggle.classList.toggle('active', willShow)
     if (willShow && !hostStarted) {
       const ok = await window.camAPI.host.start()
       if (!ok) {
@@ -387,7 +411,10 @@ function wireHostConsole() {
       await refreshPorts()
     }
   })
-  hostEl.close.addEventListener('click', () => hostEl.panel.classList.add('hidden'))
+  hostEl.settingsClose.addEventListener('click', () => {
+    hostEl.settings.classList.add('hidden')
+    hostEl.settingsToggle.classList.remove('active')
+  })
   hostEl.refresh.addEventListener('click', refreshPorts)
   hostEl.connect.addEventListener('click', toggleConnection)
   hostEl.ping.addEventListener('click', () => hostCommand({ cmd: 'ping' }))
@@ -424,10 +451,14 @@ function wireHostConsole() {
   hostEl.calibBtn.addEventListener('click', oneClickCalibrate)
 
   el.board.addEventListener('click', onBoardClick)
-  hostEl.calMove.addEventListener('change', () => {
-    el.board.classList.toggle('movable', hostEl.calMove.checked)
-    if (hostEl.calMove.checked) {
-      hostLog('已开启「点击画面移动机器」——再点板面就会把机器开过去')
+  // 「点击移动」现在是开关按钮（原来是设置页里的复选框）——操作时随时要切，
+  // 不该埋在设置页里
+  hostEl.calMove.addEventListener('click', () => {
+    hostEl.calMove.classList.toggle('active')
+    const armed = moveArmed()
+    el.board.classList.toggle('movable', armed)
+    if (armed) {
+      hostLog('已开启「点击移动」——再点板面就会把机器开过去')
     } else {
       clickTarget = null
       renderView()

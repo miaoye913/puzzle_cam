@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
+    <!-- 第一行：相机。启动时就要碰的东西 -->
     <header class="toolbar">
       <button id="toggle" class="primary">开启摄像头</button>
 
@@ -27,13 +28,21 @@
 
       <button id="snapshot" disabled>拍照保存</button>
       <button id="rescan">重新扫描</button>
+      <button id="settings-toggle">设置</button>
+    </header>
 
-      <!-- 舵机和电磁铁做成常驻开关：不用展开控制台就能按，状态一眼可见 -->
+    <!-- 第二行：干活时真的要按的。配置和调试都在设置页里，不占这儿 -->
+    <header class="toolbar vision-bar">
+      <button id="recognize" class="primary" disabled>识别一次</button>
+
+      <span class="spacer"></span>
+
+      <button id="cal-move" class="toggle" disabled
+              title="打开后，点板面就会把机器开过去">点击移动</button>
       <button id="act-servo" class="toggle" disabled
-              title="先在「串口控制台」里连上机器">舵机</button>
+              title="先在设置页里连上机器">舵机</button>
       <button id="act-em" class="toggle" disabled
-              title="先在「串口控制台」里连上机器">电磁铁</button>
-
+              title="先在设置页里连上机器">电磁铁</button>
       <!-- 吸/放：把「舵机放下 + 电磁铁 + 舵机升起」合成一个动作 -->
       <button id="act-pick" class="toggle" disabled
               title="吸：舵机放下 → 电磁铁吸合 → 舵机升起">吸</button>
@@ -42,27 +51,8 @@
       <button id="act-calib" disabled
               title="把 Y 轴开到标定位置，停顿一下再识别一次">一键校准</button>
 
-      <button id="host-toggle">串口控制台</button>
-    </header>
-
-    <header class="toolbar vision-bar">
-      <button id="recognize" class="primary" disabled>识别一次</button>
-
-      <label class="field">
-        分析分辨率
-        <select id="vision-scale">
-          <option value="640x360">640 × 360（快，短边不够准）</option>
-          <option value="960x540" selected>960 × 540（默认）</option>
-          <option value="1280x720">1280 × 720（准）</option>
-        </select>
-      </label>
-
-      <label class="field checkbox">
-        <input type="checkbox" id="vision-overlay" checked />
-        显示叠加层
-      </label>
-
       <span class="spacer"></span>
+      <span id="host-status" class="muted">未连接</span>
       <span id="vision-stats" class="muted"></span>
     </header>
 
@@ -95,108 +85,113 @@
         </div>
       </div>
 
-      <details id="log-wrap" class="log-wrap hidden">
-        <summary>侧车日志</summary>
-        <pre id="vision-log"></pre>
-      </details>
-
-      <!-- 串口控制台：操控 STM32 拼图机。放右边，不挡左边拼图区、也不和底部中间的日志打架 -->
-      <aside id="host-panel" class="host-panel hidden">
-        <header class="host-head">
-          <span>串口控制台 · 拼图机</span>
-          <button id="host-close" class="ghost" title="收起">×</button>
+      <!-- 设置页：配置项 + 调试功能都收在这儿。盖住舞台但**不挡顶部工具栏**，
+           这样「设置」按钮始终够得着，开合时板面也不用重算尺寸 -->
+      <section id="settings" class="settings hidden">
+        <header class="settings-head">
+          <h2>设置</h2>
+          <button id="settings-close" class="ghost" title="关闭">×</button>
         </header>
 
-        <section class="host-group">
-          <div class="host-row">
-            <!-- 用 input + datalist 而不是 select：既能从列表里挑，也能手打
-                 tcp://127.0.0.1:5000 连仿真设备 -->
-            <input id="host-port" list="host-port-list" placeholder="COM3 / /dev/ttyUSB0" />
-            <datalist id="host-port-list"></datalist>
-            <button id="host-refresh" class="ghost">刷新</button>
-          </div>
-          <div class="host-row">
-            <input id="host-baud" value="115200" title="波特率" />
-            <button id="host-connect">连接</button>
-          </div>
-        </section>
-
-        <section class="host-group">
-          <div class="host-row">
-            <button id="host-ping">PING</button>
-            <button id="host-reinit">重新初始化</button>
-            <button id="host-getall">查询全部</button>
-          </div>
-          <label class="field checkbox">
-            <input type="checkbox" id="host-poll" />
-            自动轮询状态
-          </label>
-        </section>
-
-        <section class="host-group">
-          <div class="host-row">
-            <label class="host-num">X <input id="host-x" value="0" /></label>
-            <label class="host-num">Y <input id="host-y" value="0" /></label>
-          </div>
-          <div class="host-row">
-            <label class="host-num">旋转° <input id="host-rot" value="0" /></label>
-          </div>
-          <!-- 舵机/电磁铁不在这儿：它们是常驻开关，在顶部工具栏上 -->
-
-          <div class="host-row">
-            <button id="host-send" class="primary">下发</button>
-            <button id="host-echo">回环测试</button>
-          </div>
-        </section>
-
-        <!-- 坐标映射：把机器的脉冲范围对到板面上，准星才能画出来 -->
-        <section class="host-group">
-          <!-- 两个轴是交叉接的：X 电机的行程走板子纵向、Y 电机走横向。
-               标签里直接写出来，免得对着「X 反向怎么动了竖的」发懵 -->
-          <div class="host-row">
-            <label class="host-num">X 脉冲 <span class="host-tilde">走纵向</span>
-              <input id="cal-xmin" class="cal-num" /></label>
-            <span class="host-tilde">~</span>
-            <input id="cal-xmax" class="cal-num" />
-          </div>
-          <div class="host-row">
-            <label class="host-num">Y 脉冲 <span class="host-tilde">走横向</span>
-              <input id="cal-ymin" class="cal-num" /></label>
-            <span class="host-tilde">~</span>
-            <input id="cal-ymax" class="cal-num" />
-          </div>
-          <div class="host-row">
-            <label class="host-num">板子 <input id="cal-bw" class="cal-num" /> ×</label>
-            <input id="cal-bh" class="cal-num" />
-            <span class="muted">mm（A4 横向 297×210）</span>
-          </div>
-          <div class="host-row">
-            <label class="field checkbox"><input type="checkbox" id="cal-invx" /> X 反向</label>
-            <label class="field checkbox"><input type="checkbox" id="cal-invy" /> Y 反向</label>
-            <button id="cal-reset" class="ghost">复位</button>
-          </div>
-          <div class="host-row">
-            <label class="field checkbox" title="勾上之后，点板面就会把机器开过去">
-              <input type="checkbox" id="cal-move" />
-              点击画面移动机器
+        <div class="settings-grid">
+          <section class="settings-card">
+            <h3>相机与分析</h3>
+            <label class="field">
+              分析分辨率
+              <select id="vision-scale">
+                <option value="640x360">640 × 360（快，短边不够准）</option>
+                <option value="960x540" selected>960 × 540（默认）</option>
+                <option value="1280x720">1280 × 720（准）</option>
+              </select>
             </label>
-          </div>
-          <div class="host-row">
-            <span class="muted" id="cal-readout">机器位置：未连接</span>
-          </div>
-        </section>
+            <label class="field checkbox">
+              <input type="checkbox" id="vision-overlay" checked />
+              显示叠加层
+            </label>
+          </section>
 
-        <section class="host-group host-state">
-          <div><span>X</span><b id="host-sx">—</b></div>
-          <div><span>Y</span><b id="host-sy">—</b></div>
-          <div><span>旋转</span><b id="host-sr">—</b></div>
-          <div><span>找零中</span><b id="host-sh">—</b></div>
-          <div><span>舵机</span><b id="host-ss">—</b></div>
-          <div><span>电磁铁</span><b id="host-se">—</b></div>
-        </section>
+          <section class="settings-card">
+            <h3>坐标映射<span class="muted">（脉冲 ↔ 板面毫米）</span></h3>
+            <!-- 两个轴是交叉接的：X 电机的行程走板子纵向、Y 电机走横向。
+                 标签里直接写出来，免得对着「X 反向怎么动了竖的」发懵 -->
+            <div class="host-row">
+              <label class="host-num">X 脉冲 <span class="host-tilde">走纵向</span>
+                <input id="cal-xmin" class="cal-num" /></label>
+              <span class="host-tilde">~</span>
+              <input id="cal-xmax" class="cal-num" />
+            </div>
+            <div class="host-row">
+              <label class="host-num">Y 脉冲 <span class="host-tilde">走横向</span>
+                <input id="cal-ymin" class="cal-num" /></label>
+              <span class="host-tilde">~</span>
+              <input id="cal-ymax" class="cal-num" />
+            </div>
+            <div class="host-row">
+              <label class="host-num">板子 <input id="cal-bw" class="cal-num" /> ×</label>
+              <input id="cal-bh" class="cal-num" />
+              <span class="muted">mm（A4 横向 297×210）</span>
+            </div>
+            <div class="host-row">
+              <label class="field checkbox"><input type="checkbox" id="cal-invx" /> X 反向</label>
+              <label class="field checkbox"><input type="checkbox" id="cal-invy" /> Y 反向</label>
+              <button id="cal-reset" class="ghost">复位</button>
+            </div>
+            <p class="muted" id="cal-readout">机器位置：未连接</p>
+          </section>
 
-        <pre id="host-log" class="host-log"></pre>
-      </aside>
+          <section class="settings-card">
+            <h3>串口 · 拼图机</h3>
+            <div class="host-row">
+              <!-- input + datalist 而不是 select：既能从列表里挑，也能手打
+                   tcp://127.0.0.1:5000 连仿真设备 -->
+              <input id="host-port" list="host-port-list" placeholder="COM3 / /dev/ttyUSB0" />
+              <datalist id="host-port-list"></datalist>
+              <button id="host-refresh" class="ghost">刷新</button>
+              <input id="host-baud" class="cal-num" value="115200" title="波特率" />
+              <button id="host-connect">连接</button>
+            </div>
+
+            <div class="host-row">
+              <button id="host-ping">PING</button>
+              <button id="host-reinit">重新初始化</button>
+              <button id="host-getall">查询全部</button>
+              <button id="host-echo">回环测试</button>
+            </div>
+            <label class="field checkbox">
+              <input type="checkbox" id="host-poll" />
+              自动轮询状态
+            </label>
+
+            <div class="host-row">
+              <label class="host-num">X <input id="host-x" value="0" /></label>
+              <label class="host-num">Y <input id="host-y" value="0" /></label>
+              <label class="host-num">旋转° <input id="host-rot" value="0" /></label>
+              <button id="host-send" class="primary">下发</button>
+            </div>
+
+            <section class="host-state">
+              <div><span>X</span><b id="host-sx">—</b></div>
+              <div><span>Y</span><b id="host-sy">—</b></div>
+              <div><span>旋转</span><b id="host-sr">—</b></div>
+              <div><span>找零中</span><b id="host-sh">—</b></div>
+              <div><span>舵机</span><b id="host-ss">—</b></div>
+              <div><span>电磁铁</span><b id="host-se">—</b></div>
+            </section>
+          </section>
+
+          <section class="settings-card settings-logs">
+            <h3>日志</h3>
+            <div class="log-col">
+              <p class="muted">侧车日志</p>
+              <pre id="vision-log"></pre>
+            </div>
+            <div class="log-col">
+              <p class="muted">串口收发</p>
+              <pre id="host-log" class="host-log"></pre>
+            </div>
+          </section>
+        </div>
+      </section>
     </main>
 
     <footer class="statusbar">

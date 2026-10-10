@@ -220,50 +220,125 @@ video.hidden {
   background: #16191f;
 }
 
-/* ── 串口控制台 ────────────────────────────────────────────── */
-.host-panel {
+/* ── 设置页：盖住舞台，但**不挡顶部工具栏** ────────────────── */
+.settings {
   position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 340px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  background: var(--panel);
-  border-left: 1px solid var(--line);
-  box-shadow: -8px 0 24px rgb(0 0 0 / 45%);
-  overflow: hidden;
-  z-index: 5;
+  inset: 0;
+  z-index: 10;
+  padding: 16px 20px 28px;
+  background: var(--bg);
+  overflow: auto;
 }
 
-.host-panel.hidden {
+.settings.hidden {
   display: none;
 }
 
-.host-head {
+.settings-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 12px;
-  color: var(--muted);
+  margin-bottom: 14px;
 }
 
-.host-group {
+.settings-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+/* 卡片自适应排两列；日志那张跨整行 */
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.settings-card {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.settings-card h3 {
+  margin: 0 0 2px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.settings-card h3 .muted {
+  margin-left: 6px;
+  font-weight: 400;
+}
+
+.settings-logs {
+  grid-column: 1 / -1;
+}
+
+.settings-logs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.settings-logs h3 {
+  grid-column: 1 / -1;
+}
+
+.log-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.log-col pre {
+  height: 190px;
+  margin: 0;
+  padding: 6px 8px;
+  overflow: auto;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: #16191f;
+  background: #0f1216;
+  color: #b9c2cf;
+  font: 11px/1.45 Consolas, "Cascadia Mono", monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+
+.settings-card input[type='text'],
+.settings-card input:not([type]),
+.settings-card select {
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #23272f;
+  color: var(--text);
+  font: inherit;
+}
+
+.settings-card input.cal-num {
+  width: 70px;
+  flex: 0 0 auto;
+}
+
+.settings-card .host-num input {
+  width: 100%;
+  min-width: 0;
 }
 
 .host-row {
   display: flex;
   gap: 6px;
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .host-row > select,
@@ -290,23 +365,6 @@ video.hidden {
 .host-tilde {
   color: var(--muted);
   font-size: 12px;
-}
-
-/* 脉冲范围那几个框窄一点，一行塞得下 min ~ max */
-.host-panel input.cal-num {
-  width: 62px;
-  flex: 0 0 auto;
-}
-
-.host-panel input[type='text'],
-.host-panel input:not([type]),
-.host-panel select {
-  padding: 4px 6px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #23272f;
-  color: var(--text);
-  font: inherit;
 }
 
 .host-state {
@@ -368,40 +426,6 @@ button.ghost:hover {
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-}
-
-.log-wrap {
-  /* 底部左右两角被两个浮动小窗占了，日志放中间 */
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  bottom: 10px;
-  max-width: min(680px, 60%);
-  padding: 6px 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: rgba(12, 14, 18, 0.92);
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.log-wrap.hidden {
-  display: none;
-}
-
-.log-wrap summary {
-  cursor: pointer;
-}
-
-.log-wrap pre {
-  max-height: 180px;
-  margin: 8px 0 2px;
-  overflow: auto;
-  color: #b9c0cc;
-  font-size: 11px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  user-select: text;
 }
 
 .placeholder {

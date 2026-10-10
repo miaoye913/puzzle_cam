@@ -16,7 +16,6 @@ const el = {
   board: document.getElementById('board'),
   assembly: document.getElementById('assembly'),
   assemblyHint: document.getElementById('assembly-hint'),
-  logWrap: document.getElementById('log-wrap'),
   visionLog: document.getElementById('vision-log'),
 }
 
@@ -228,7 +227,6 @@ let visionFpsAt = 0
 let lastResult = null
 
 function appendVisionLog(line) {
-  el.logWrap.classList.remove('hidden')
   el.visionLog.textContent += `${line}\n`
   // 只保留末尾若干行，长时间运行不至于把内存堆满
   const lines = el.visionLog.textContent.split('\n')
