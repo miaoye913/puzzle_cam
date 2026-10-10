@@ -43,6 +43,7 @@ const hostEl = {
   calReset: document.getElementById('cal-reset'),
   calCalibY: document.getElementById('cal-caliby'),
   calCalibWait: document.getElementById('cal-calibwait'),
+  calCarryDwell: document.getElementById('cal-carrydwell'),
   calReadout: document.getElementById('cal-readout'),
   calMove: document.getElementById('cal-move'),
   rotMain: document.getElementById('rot-main'),
@@ -373,6 +374,15 @@ async function autoAssemble() {
     hostLog(`   去取 #${path.id}：脉冲(${from[0]}, ${from[1]})`)
     if (await moveAndWait(from[0], from[1], '去取') && !autoAbort) {
       await runPickPlace('pick')
+      // 吸起来之后停一下再走：`吸` 的最后一步只等到命令被 ACK，舵机这时还没真正升到位，
+      // 不等就转、就走等于拖着碎片蹭。时长在设置页可调。
+      if (!autoAbort) {
+        const dwell = Math.max(0, Math.round(Number(calibration.autoCarryDwellMs) || 0))
+        if (dwell) {
+          hostLog(`   吸住了，停 ${dwell}ms 等舵机升到位`)
+          await sleep(dwell)
+        }
+      }
     }
 
     // 4. 转到目标姿态（拾取时工具在 0°，所以直接转到 dRot 就是目标姿态）
@@ -520,7 +530,7 @@ async function toggleActuator(which) {
 const CAL_DEFAULTS = {
   xMin: 500, xMax: 2200, yMin: 2200, yMax: 25100,
   invertX: false, invertY: false, boardW: 297, boardH: 210,
-  calibYPulse: 32000, calibSettleMs: 4000,
+  calibYPulse: 32000, calibSettleMs: 4000, autoCarryDwellMs: 1000,
 }
 
 function fillCalibrationForm() {
@@ -534,6 +544,7 @@ function fillCalibrationForm() {
   hostEl.calBH.value = calibration.boardH
   hostEl.calCalibY.value = calibration.calibYPulse
   hostEl.calCalibWait.value = calibration.calibSettleMs
+  hostEl.calCarryDwell.value = calibration.autoCarryDwellMs
 }
 
 function applyCalibrationForm() {
@@ -551,6 +562,7 @@ function applyCalibrationForm() {
   calibration.boardH = num(hostEl.calBH, calibration.boardH)
   calibration.calibYPulse = num(hostEl.calCalibY, calibration.calibYPulse)
   calibration.calibSettleMs = num(hostEl.calCalibWait, calibration.calibSettleMs)
+  calibration.autoCarryDwellMs = num(hostEl.calCarryDwell, calibration.autoCarryDwellMs)
   saveCalibration()
   renderView()          // 网格刻度和准星都跟着范围变，立刻重画
   updateCalReadout()
@@ -663,7 +675,8 @@ function wireHostConsole() {
 
   // 坐标映射那几个框：改完立刻存下来并重画，不用点「应用」
   for (const input of [hostEl.calXMin, hostEl.calXMax, hostEl.calYMin, hostEl.calYMax,
-    hostEl.calBW, hostEl.calBH, hostEl.calCalibY, hostEl.calCalibWait]) {
+    hostEl.calBW, hostEl.calBH, hostEl.calCalibY, hostEl.calCalibWait,
+    hostEl.calCarryDwell]) {
     input.addEventListener('change', applyCalibrationForm)
   }
   hostEl.calInvX.addEventListener('change', applyCalibrationForm)
