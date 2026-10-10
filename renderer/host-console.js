@@ -28,6 +28,14 @@ const hostEl = {
   send: document.getElementById('host-send'),
   echo: document.getElementById('host-echo'),
   log: document.getElementById('host-log'),
+  calXMin: document.getElementById('cal-xmin'),
+  calXMax: document.getElementById('cal-xmax'),
+  calYMin: document.getElementById('cal-ymin'),
+  calYMax: document.getElementById('cal-ymax'),
+  calInvX: document.getElementById('cal-invx'),
+  calInvY: document.getElementById('cal-invy'),
+  calReset: document.getElementById('cal-reset'),
+  calReadout: document.getElementById('cal-readout'),
   state: {
     x: document.getElementById('host-sx'),
     y: document.getElementById('host-sy'),
@@ -142,6 +150,61 @@ async function sendSettings() {
   if (reply?.ok) hostLog(`已下发：${(reply.sent ?? []).join(' ')}`)
 }
 
+// ── 坐标映射（脉冲 ↔ 板面）────────────────────────────────────────
+const CAL_DEFAULTS = {
+  xMin: 500, xMax: 2200, yMin: 2200, yMax: 25100, invertX: false, invertY: false,
+}
+
+function fillCalibrationForm() {
+  hostEl.calXMin.value = calibration.xMin
+  hostEl.calXMax.value = calibration.xMax
+  hostEl.calYMin.value = calibration.yMin
+  hostEl.calYMax.value = calibration.yMax
+  hostEl.calInvX.checked = calibration.invertX
+  hostEl.calInvY.checked = calibration.invertY
+}
+
+function applyCalibrationForm() {
+  const num = (input, fallback) => {
+    const value = Number(input.value)
+    return Number.isFinite(value) ? value : fallback
+  }
+  calibration.xMin = num(hostEl.calXMin, calibration.xMin)
+  calibration.xMax = num(hostEl.calXMax, calibration.xMax)
+  calibration.yMin = num(hostEl.calYMin, calibration.yMin)
+  calibration.yMax = num(hostEl.calYMax, calibration.yMax)
+  calibration.invertX = hostEl.calInvX.checked
+  calibration.invertY = hostEl.calInvY.checked
+  saveCalibration()
+  renderView()          // 网格刻度和准星都跟着范围变，立刻重画
+  updateCalReadout()
+}
+
+function updateCalReadout() {
+  const rect = lastResult?.board?.rect_size
+  if (!machinePose) {
+    hostEl.calReadout.textContent = '机器位置：未连接'
+    return
+  }
+  if (!rect) {
+    hostEl.calReadout.textContent =
+      `机器脉冲(${Math.round(machinePose.x)}, ${Math.round(machinePose.y)})，还没有板面`
+    return
+  }
+  const [bx, by] = pulsesToBoard(machinePose.x, machinePose.y, rect[0], rect[1])
+  const out = pulseOutOfRange(machinePose.x, machinePose.y)
+  hostEl.calReadout.textContent =
+    `机器脉冲(${Math.round(machinePose.x)}, ${Math.round(machinePose.y)}) → ` +
+    `板面(${Math.round(bx)}, ${Math.round(by)})${out ? ' 超出范围' : ''}`
+}
+
+/** 机器位置一变就重画板面，准星跟着走 */
+function onMachinePose(status) {
+  machinePose = { x: status.posX, y: status.posY }
+  updateCalReadout()
+  renderView()
+}
+
 function wireHostConsole() {
   hostEl.toggle.addEventListener('click', async () => {
     const willShow = hostEl.panel.classList.contains('hidden')
@@ -163,7 +226,10 @@ function wireHostConsole() {
   hostEl.reinit.addEventListener('click', () => hostCommand({ cmd: 'reinit' }))
   hostEl.getAll.addEventListener('click', async () => {
     const reply = await hostCommand({ cmd: 'get_all' })
-    if (reply?.status) showStatus(reply.status)
+    if (reply?.status) {
+      showStatus(reply.status)
+      onMachinePose(reply.status)
+    }
   })
   hostEl.echo.addEventListener('click', () => hostCommand({ cmd: 'echo', data: '11 22 33' }))
   hostEl.send.addEventListener('click', sendSettings)
@@ -171,9 +237,24 @@ function wireHostConsole() {
     hostCommand({ cmd: 'poll', interval_ms: hostEl.poll.checked ? POLL_INTERVAL_MS : 0 })
   })
 
+  // 坐标映射那几个框：改完立刻存下来并重画，不用点「应用」
+  for (const input of [hostEl.calXMin, hostEl.calXMax, hostEl.calYMin, hostEl.calYMax]) {
+    input.addEventListener('change', applyCalibrationForm)
+  }
+  hostEl.calInvX.addEventListener('change', applyCalibrationForm)
+  hostEl.calInvY.addEventListener('change', applyCalibrationForm)
+  hostEl.calReset.addEventListener('click', () => {
+    Object.assign(calibration, CAL_DEFAULTS)
+    fillCalibrationForm()
+    applyCalibrationForm()
+  })
+
   window.camAPI.host.onLog(hostLog)
   window.camAPI.host.onEvent((message) => {
-    if (message.event === 'status') showStatus(message)
+    if (message.event === 'status') {
+      showStatus(message)
+      onMachinePose(message)
+    }
     else if (message.event === 'conn') {
       setConnected(message.state === 'up')
       hostLog(`连接：${message.state}${message.target ? ` (${message.target})` : ''}`)
@@ -181,6 +262,10 @@ function wireHostConsole() {
     else if (message.event === 'log') hostLog(message.text)
     else if (message.event === 'echo') hostLog(`回环：${message.data}`)
   })
+
+  // 把存下来的标定填进框里，并显示一次读数
+  fillCalibrationForm()
+  updateCalReadout()
 }
 
 if (window.camAPI?.host) wireHostConsole()

@@ -456,6 +456,88 @@ function planPaths(result, assemblyMap) {
   return paths
 }
 
+/**
+ * 板面坐标网格。
+ *
+ * 刻度标的是**脉冲**而不是像素——这套坐标系存在的意义就是「机器的脉冲落在板子的哪儿」，
+ * 标脉冲才读得出标定对不对。方向翻转由 boardToPulses 自己处理，这里不用管。
+ */
+function drawCalibrationGrid(ctx, rectW, rectH, layout) {
+  const divisions = 8
+  const GRID = 'rgba(255,255,255,0.10)'
+  const TEXT = 'rgba(255,255,255,0.6)'
+  const HALO = 'rgba(0,0,0,0.7)'
+  ctx.save()
+  ctx.font = '500 10px "Segoe UI", "Microsoft YaHei", sans-serif'
+
+  const tick = (text, x, y, align) => {
+    ctx.textAlign = align
+    ctx.lineWidth = 3
+    ctx.strokeStyle = HALO
+    ctx.strokeText(text, x, y)
+    ctx.fillStyle = TEXT
+    ctx.fillText(text, x, y)
+  }
+
+  for (let i = 1; i < divisions; i++) {
+    const gx = (i / divisions) * rectW * layout.scale
+    ctx.strokeStyle = GRID
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(gx, 0)
+    ctx.lineTo(gx, layout.h)
+    ctx.stroke()
+    tick(String(Math.round(boardToPulses((i / divisions) * rectW, 0, rectW, rectH)[0])),
+      gx, layout.h - 5, 'center')
+  }
+  for (let i = 1; i < divisions; i++) {
+    const gy = (i / divisions) * rectH * layout.scale
+    ctx.strokeStyle = GRID
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(0, gy)
+    ctx.lineTo(layout.w, gy)
+    ctx.stroke()
+    tick(String(Math.round(boardToPulses(0, (i / divisions) * rectH, rectW, rectH)[1])),
+      5, gy - 3, 'left')
+  }
+  ctx.restore()
+}
+
+/** 机器此刻在板子的哪儿。脉冲跑出标定范围时画成红色、提示超出 */
+function drawMachineMarker(ctx, rectW, rectH, layout) {
+  if (!machinePose) return
+  const [bx, by] = pulsesToBoard(machinePose.x, machinePose.y, rectW, rectH)
+  const cx = bx * layout.scale
+  const cy = by * layout.scale
+  const out = pulseOutOfRange(machinePose.x, machinePose.y)
+  const color = out ? '#ff8a8a' : '#5ef1c0'
+
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.lineWidth = 1.5
+  ctx.beginPath()
+  ctx.moveTo(cx - 14, cy)
+  ctx.lineTo(cx + 14, cy)
+  ctx.moveTo(cx, cy - 14)
+  ctx.lineTo(cx, cy + 14)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.arc(cx, cy, 6, 0, Math.PI * 2)
+  ctx.stroke()
+
+  const text = `脉冲(${Math.round(machinePose.x)}, ${Math.round(machinePose.y)}) → ` +
+    `板面(${Math.round(bx)}, ${Math.round(by)})${out ? ' 超出范围' : ''}`
+  ctx.font = '600 12px "Segoe UI", "Microsoft YaHei", sans-serif'
+  ctx.textAlign = 'center'
+  ctx.lineWidth = 3
+  ctx.strokeStyle = 'rgba(0,0,0,0.8)'
+  ctx.strokeText(text, cx, cy - 20)
+  ctx.fillStyle = color
+  ctx.fillText(text, cx, cy - 20)
+  ctx.restore()
+}
+
 function drawOverlay(result, layout) {
   const canvas = el.overlay
   if (!result || !layout) {
@@ -503,6 +585,9 @@ function drawOverlay(result, layout) {
   }
   zoneLabel('拼图区 · 拼好的矩形', dx / 2, '#9dc0ff')
   zoneLabel('识别区 · 识别到的碎片', dx + (displayW - dx) / 2, '#9df0c4')
+
+  // 板面坐标网格：刻度是脉冲，方便对着标定读数
+  drawCalibrationGrid(ctx, boardW, boardH, layout)
 
   // ── 左半「拼图区」：拼好的矩形 ────────────────────────────────
   // 按**和碎片一样的比例**画（1 板面像素 = 1 板面像素），这样两边的块大小能直接对着比；
@@ -672,6 +757,9 @@ function drawOverlay(result, layout) {
     ctx.strokeText(text, mx, my)
     ctx.fillText(text, mx, my)
   }
+
+  // 机器位置画在最上层：它是「此刻在哪」，被别的东西盖住就没意义了
+  drawMachineMarker(ctx, boardW, boardH, layout)
 
   // 画完再按「显示叠加层」那个勾决定露不露脸，免得把用户的勾选覆盖掉
   syncOverlayVisibility()

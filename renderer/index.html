@@ -134,6 +134,28 @@
           </div>
         </section>
 
+        <!-- 坐标映射：把机器的脉冲范围对到板面上，准星才能画出来 -->
+        <section class="host-group">
+          <div class="host-row">
+            <label class="host-num">X 脉冲 <input id="cal-xmin" class="cal-num" /></label>
+            <span class="host-tilde">~</span>
+            <input id="cal-xmax" class="cal-num" />
+          </div>
+          <div class="host-row">
+            <label class="host-num">Y 脉冲 <input id="cal-ymin" class="cal-num" /></label>
+            <span class="host-tilde">~</span>
+            <input id="cal-ymax" class="cal-num" />
+          </div>
+          <div class="host-row">
+            <label class="field checkbox"><input type="checkbox" id="cal-invx" /> X 反向</label>
+            <label class="field checkbox"><input type="checkbox" id="cal-invy" /> Y 反向</label>
+            <button id="cal-reset" class="ghost">复位</button>
+          </div>
+          <div class="host-row">
+            <span class="muted" id="cal-readout">机器位置：未连接</span>
+          </div>
+        </section>
+
         <section class="host-group host-state">
           <div><span>X</span><b id="host-sx">—</b></div>
           <div><span>Y</span><b id="host-sy">—</b></div>
@@ -153,6 +175,7 @@
       <span id="stats"></span>
     </footer>
 
+    <script src="calibration.js"></script>
     <script src="renderer.js"></script>
     <script src="host-console.js"></script>
   </body>

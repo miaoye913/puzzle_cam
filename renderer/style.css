@@ -282,6 +282,17 @@ video.hidden {
   min-width: 0;
 }
 
+.host-tilde {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 脉冲范围那几个框窄一点，一行塞得下 min ~ max */
+.host-panel input.cal-num {
+  width: 62px;
+  flex: 0 0 auto;
+}
+
 .host-panel input[type='text'],
 .host-panel input:not([type]),
 .host-panel select {
