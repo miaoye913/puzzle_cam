@@ -25,9 +25,18 @@ import cv2
 
 # 边长匹配的相对容差：两条边长度差超过它就不考虑贴在一起
 EDGE_TOLERANCE = 0.45
-# 每步保留多少条候选摆法。实测 600 和 12000 结果完全一样（搜索空间已经穷尽），
-# 所以取小的那个，省时间
-BEAM_WIDTH = 250
+# 每步保留多少条候选摆法。
+#
+# 实测（真实碎片，4 块）：beam 从 2000 一路降到 **5**，搜出来的尺寸、填充率、分数
+# **完全一样**——说明真正有希望的分支很少，宽束只是白算。已知答案的合成剖分同理。
+# 所以平时用窄束；窄束万一没搜出像样的矩形，再用宽束重试一遍兜底。
+BEAM_WIDTH = 40
+BEAM_WIDTH_WIDE = 400
+# 差到这个地步才值得用宽束重搜一遍。窄束和宽束实测结果完全一致，宽束只是兜底，
+# 而它一开就是十几倍的时间，所以门槛要卡得**很**低——卡高了反而会因为「不够好」
+# 触发重搜，把速度又赔回去（这个坑踩过：门槛设 0.97，而 960x540 下最好只到 0.9675，
+# 每次都白跑一遍宽束）。
+BAD_FILL = 0.90
 # 碎片先朝内缩几像素再拼——**这是量出来的，不是拍的**：
 # 掩膜经过 HSV 阈值 + 形态学之后，碎片的边界整体比实物大 3px 左右（本机实测最优值），
 # 不缩的话几块之间怎么摆都会留下缝。所以这里把内缩量也当成待定参数，用拼合结果自己选。
@@ -111,17 +120,28 @@ def _apply(poly, transform):
     return poly @ rotation.T + translation
 
 
-def _overlap_ratio(moving_world, placed_worlds, moving_area):
-    """和已放置的块相交面积占比。碎片近似凸，用 intersectConvexConvex 快得多。"""
-    hull = cv2.convexHull(moving_world.astype(np.float32))
-    # 稍微缩一点，避免「共边」被算成相交
+def _prep_overlap(poly):
+    """
+    重叠判定要反复用的东西预先算好：缩过一点的凸包 + 包围盒。
+
+    缩 0.2% 是为了「共边」不被算成相交。**必须预先算**——这是热路径：
+    每个候选摆法都要和已放置的每一块比一次，之前每次都在里面重算凸包。
+    """
+    hull = cv2.convexHull(np.asarray(poly, np.float32))
     c = hull.reshape(-1, 2).mean(axis=0)
     hull = (c + (hull.reshape(-1, 2) - c) * 0.998).reshape(-1, 1, 2).astype(np.float32)
-    worst = 0.0
-    for other in placed_worlds:
-        oh = cv2.convexHull(other.astype(np.float32))
-        oc = oh.reshape(-1, 2).mean(axis=0)
-        oh = (oc + (oh.reshape(-1, 2) - oc) * 0.998).reshape(-1, 1, 2).astype(np.float32)
+    xs = hull.reshape(-1, 2)[:, 0]
+    ys = hull.reshape(-1, 2)[:, 1]
+    return hull, (float(xs.min()), float(ys.min()), float(xs.max()), float(ys.max()))
+
+
+def _overlap_ratio(moving, placed_prepared, moving_area):
+    """和已放置的块相交面积占比。碎片近似凸，用 intersectConvexConvex 快得多。"""
+    hull, (x0, y0, x1, y1) = moving
+    for oh, (ox0, oy0, ox1, oy1) in placed_prepared:
+        # 包围盒先粗筛：不相交就直接跳过，省下一次 intersectConvexConvex
+        if x1 < ox0 or x0 > ox1 or y1 < oy0 or y0 > oy1:
+            continue
         try:
             area, _ = cv2.intersectConvexConvex(hull, oh)
         except cv2.error:
@@ -217,6 +237,9 @@ def _beam_solve(polys, beam_width=BEAM_WIDTH, deadline=None):
             if deadline is not None and time.perf_counter() > deadline:
                 return None
             placed_worlds = {i: _apply(polys[i], t) for i, t in transforms.items()}
+            # 已放置那几块的凸包只和 state 有关，和候选无关——在这里算一次，
+            # 别放到逐个候选的循环里重算
+            placed_prepared = [_prep_overlap(w) for w in placed_worlds.values()]
             for moving in range(n):
                 if moving in transforms:
                     continue
@@ -231,7 +254,8 @@ def _beam_solve(polys, beam_width=BEAM_WIDTH, deadline=None):
                                 continue
                             for transform in _alignments(moving_poly, me, fixed_world, fe):
                                 world = _apply(moving_poly, transform)
-                                if _overlap_ratio(world, placed_worlds.values(), areas[moving]):
+                                if _overlap_ratio(_prep_overlap(world), placed_prepared,
+                                                  areas[moving]):
                                     continue
                                 new_t = dict(transforms)
                                 new_t[moving] = transform
@@ -340,34 +364,49 @@ def solve(pieces, aspect=None, shrink=None, beam_width=None, time_budget=None, n
     # 要扫一圈的话显式传 aspect=[...]，代价是每个系数多花几秒。
     aspects = [1.0] if aspect is None else list(aspect)
 
-    best = None
-    for s in aspects:
-        for d in (shrink if shrink is not None else SHRINK_CANDIDATES):
-            if time.perf_counter() > deadline:
+    def scan(beam_width):
+        """按 (拉伸, 内缩) 扫一遍，返回 (最好的结果, 是否超时)。搜到像样的矩形就早退。"""
+        best = None
+        for s in aspects:
+            for d in (shrink if shrink is not None else SHRINK_CANDIDATES):
+                if time.perf_counter() > deadline:
+                    return best, True
+                shrunk = [_shrink_poly(p, d) for p in polys]
+                got = _beam_solve(_scaled(shrunk, s), beam_width, deadline)
+                if got is None:
+                    continue
+                score, metrics, ids, placed = got
+                placements, size = _normalize(placed)
+                cand = {
+                    'size': [round(size[0], 1), round(size[1], 1)],
+                    'aspect': round(float(s), 3),
+                    'shrink_px': round(float(d), 1),
+                    'score': round(float(score), 4),
+                    'fill': round(float(metrics.get('fill', 0.0)), 4),
+                    'outer_vertices': int(metrics.get('outer_vertices', 0)),
+                    'placements': [{'index': int(ids[i]),
+                                    'polygon': [[round(float(x), 1), round(float(y), 1)] for x, y in p]}
+                                   for i, p in enumerate(placements)],
+                }
                 if node_log is not None:
-                    node_log.append(f'  时间预算用尽（{budget:.0f}s）')
-                return best
-            shrunk = [_shrink_poly(p, d) for p in polys]
-            got = _beam_solve(_scaled(shrunk, s), width, deadline)
-            if got is None:
-                continue
-            score, metrics, ids, placed = got
-            placements, size = _normalize(placed)
-            cand = {
-                'size': [round(size[0], 1), round(size[1], 1)],
-                'aspect': round(float(s), 3),
-                'shrink_px': round(float(d), 1),
-                'score': round(float(score), 4),
-                'fill': round(float(metrics.get('fill', 0.0)), 4),
-                'outer_vertices': int(metrics.get('outer_vertices', 0)),
-                'placements': [{'index': int(ids[i]),
-                                'polygon': [[round(float(x), 1), round(float(y), 1)] for x, y in p]}
-                               for i, p in enumerate(placements)],
-            }
-            if node_log is not None:
-                node_log.append(
-                    f'  拉伸 {s:.2f} 内缩 {d:.0f}px: 填满外接矩形 {cand["fill"]:.4f}，'
-                    f'外轮廓 {cand["outer_vertices"]} 个顶点，总分 {cand["score"]:.4f}')
-            if best is None or cand['score'] < best['score']:
-                best = cand
+                    node_log.append(
+                        f'  拉伸 {s:.2f} 内缩 {d:.0f}px: 填满外接矩形 {cand["fill"]:.4f}，'
+                        f'外轮廓 {cand["outer_vertices"]} 个顶点，总分 {cand["score"]:.4f}')
+                if best is None or cand['score'] < best['score']:
+                    best = cand
+        return best, False
+
+    # 窄束扫一遍就够了——实测它和宽束结果完全一致。不设「够好了就早退」那类门槛：
+    # 填充率随内缩量是先升后降的，看到 0.96 就停会停在坡上，拿到的是次优解。
+    best, timed_out = scan(width or BEAM_WIDTH)
+
+    # 只有结果明显不成样子时才放宽重搜。这一步贵十几倍，宁可用窄束的次优解也不轻易走
+    if (not timed_out and time.perf_counter() < deadline
+            and (best is None or best['fill'] < BAD_FILL)):
+        if node_log is not None:
+            node_log.append(f'  窄束结果太差（{0 if best is None else best["fill"]:.4f}），'
+                            f'放宽到 {BEAM_WIDTH_WIDE} 再搜一遍')
+        wide, _ = scan(BEAM_WIDTH_WIDE)
+        if wide is not None and (best is None or wide['score'] < best['score']):
+            best = wide
     return best
