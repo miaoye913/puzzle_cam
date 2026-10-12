@@ -172,6 +172,14 @@
               </label>
               <span class="muted">命令发出后，等机器走完（拍时间，机器没到就调大）</span>
             </div>
+            <!-- 「移动等待」是下限，长距离按这个速度算：等多久 = max(移动等待, 距离÷速度)。
+                 校准把工具停在画面外的停车位，所以「去取第一块」那一趟最长 -->
+            <div class="host-row">
+              <label class="host-num">移动速度
+                <input id="cal-speed" class="cal-num" /> mm/s
+              </label>
+              <span class="muted">按距离算长距离要等多久；走不完就把它调小</span>
+            </div>
             <div class="host-row">
               <label class="host-num">到位停留
                 <input id="cal-settledwell" class="cal-num" /> ms

@@ -42,6 +42,7 @@ const hostEl = {
   calReset: document.getElementById('cal-reset'),
   calCalibY: document.getElementById('cal-caliby'),
   calCalibWait: document.getElementById('cal-calibwait'),
+  calSpeed: document.getElementById('cal-speed'),
   calCarryDwell: document.getElementById('cal-carrydwell'),
   calSettleDwell: document.getElementById('cal-settledwell'),
   calGap: document.getElementById('cal-gap'),
@@ -169,7 +170,10 @@ async function sendSettings() {
     y: Number(hostEl.y.value) || 0,
     rot: Number(hostEl.rot.value) || 0,
   })
-  if (reply?.ok) hostLog(`已下发：${(reply.sent ?? []).join(' ')}`)
+  if (reply?.ok) {
+    hostLog(`已下发：${(reply.sent ?? []).join(' ')}`)
+    rememberPosition(Number(hostEl.x.value), Number(hostEl.y.value))
+  }
 }
 
 // ── 舵机 / 电磁铁：工具栏上的常驻开关 ───────────────────────────────
@@ -226,7 +230,9 @@ function updateActuatorButtons() {
   //（那时候**不会**再校准一次：碎片已经被搬动过，重新识别等于把进度扔掉）。
   if (autoRunning) hostEl.autoBtn.textContent = '停止'
   else if (!autoTotal) hostEl.autoBtn.textContent = '一键拼图'
-  else if (autoIndex >= autoTotal) hostEl.autoBtn.textContent = `已拼完 ${autoTotal} 块`
+  // 拼完之后按钮写「重新拼图」而不是「已拼完 N 块」：后者看着像个状态，
+  // 不像能按的，实测就是有人以为按钮死了
+  else if (autoIndex >= autoTotal) hostEl.autoBtn.textContent = `重新拼图（上一轮 ${autoTotal} 块）`
   else if (autoIndex > 0) hostEl.autoBtn.textContent = `继续（第 ${autoIndex + 1}/${autoTotal} 块）`
   else hostEl.autoBtn.textContent = '一键拼图'
   hostEl.autoBtn.classList.toggle('stop', autoRunning)
@@ -314,26 +320,72 @@ async function sleepAbortable(ms) {
 }
 
 /**
+ * 机器**被命令**到达的位置（脉冲）。协议里的 posX/posY 就是命令寄存器，
+ * 所以这里记下的就是机器那边的值——不必再去问。
+ *
+ * 为什么要记：等待时间按**这一趟要走多远**算。以前是固定 4 秒，可是「一键拼图」
+ * 第一步就是把工具从**停车位**（校准把 Y 开到 32000，画面外）开回板面，这一趟比后面
+ * 任何一趟都长——固定 4 秒对短距离够、对这一趟不够，于是表现成
+ * 「第一次的延时有问题」「每次延时都不一样」。现在按距离算，日志里写明走了多远、等了多久。
+ */
+let commanded = null
+
+function rememberPosition(x, y) {
+  if (!commanded) commanded = { x: 0, y: 0 }   // 还不知道就按 0 起算，等出来只会偏长不会偏短
+  if (Number.isFinite(x)) commanded.x = x
+  if (Number.isFinite(y)) commanded.y = y
+}
+
+/**
+ * 从 a 走到 b 有多少毫米。**两个轴要各算各的**：机器两个轴的脉冲/毫米不一样，
+ * 而且轴是交叉的（X 电机走板子纵向），拿一个平均比例糊弄一定算错。
+ */
+function travelMm(a, b) {
+  const cross = AXES_CROSSED
+  const perX = Math.abs(calibration.xMax - calibration.xMin) / ((cross ? calibration.boardH : calibration.boardW) || 1)
+  const perY = Math.abs(calibration.yMax - calibration.yMin) / ((cross ? calibration.boardW : calibration.boardH) || 1)
+  if (!(perX > 0) || !(perY > 0)) return 0
+  return Math.hypot((b.x - a.x) / perX, (b.y - a.y) / perY)
+}
+
+/**
  * 发一条移动命令，等机器走完，再停一下。
  *
  * **只看时间，不问机器**。以前这里轮询 get_all 判「到位」，那是错的：协议里的
  * posX/posY 是**命令寄存器**，命令一发下去它就等于目标值了，跟机器实际走到哪没关系——
  * 所以第一次轮询就「判到位」，整个等待只剩一次轮询的时间，动作在机器还在路上时就下去了。
- * 实测反馈「一边停一边放」「后面的连吸都没停就吸」都是它。
  *
- * 现在是固定的两段，顺序执行，**每一块、每一步都一模一样**：
+ * 等待分两段，顺序执行：
  *
- *   发命令 → 等「移动等待」估它走完 → 停「到位停留」等它停稳 → 交回调用方做动作
+ *   发命令 → 等它走完 → 停「到位停留」等它停稳 → 交回调用方做动作
  *
- * 两个值都在设置页里可调。机器还没走到就把「移动等待」调大。
+ * 第一段的时长 = **max(移动等待, 这一趟的毫米数 ÷ 移动速度)**：
+ *
+ *   - 「移动等待」当下限：短距离还是按你调好的那个值等，行为不变；
+ *   - 长距离按速度算出来，走多远等多久。**只会等得更久，不会更短**——
+ *     拿不准的距离宁可多等，也别在机器还在路上时动舵机。
+ *
+ * 日志里会写明「要走多少毫米 → 等多少毫秒」，对不上就照那个数调「移动速度」。
  */
+function travelWaitMs(x, y) {
+  const dist = commanded ? travelMm(commanded, { x, y }) : 0
+  const speed = Number(calibration.autoSpeedMmS) || 0
+  const floor = Math.max(0, Math.round(Number(calibration.autoMoveMs) || 0))
+  const bySpeed = speed > 0 ? Math.round((dist / speed) * 1000) : 0
+  return { dist, speed, floor, wait: Math.max(floor, bySpeed) }
+}
+
 async function moveAndWait(x, y, label) {
+  const { dist, speed, floor, wait: travel } = travelWaitMs(x, y)
+
   const reply = await hostCommand({ cmd: 'set', x, y })
   if (!reply?.ok) return false
+  rememberPosition(x, y)
 
-  const travel = Math.max(0, Math.round(Number(calibration.autoMoveMs) || 0))
   if (travel) {
-    hostLog(`   ${label}：命令已发，等 ${travel}ms 走完`)
+    hostLog(commanded && dist > 0
+      ? `   ${label}：要走 ${dist.toFixed(0)}mm → 等 ${travel}ms 走完（速度 ${speed}mm/s，下限 ${floor}ms）`
+      : `   ${label}：命令已发，等 ${travel}ms 走完`)
     await sleepAbortable(travel)
   }
 
@@ -380,13 +432,14 @@ async function assembleOnePiece(path, rect) {
   hostLog(`   旋转 → ${rot}°`)
   await hostCommand({ cmd: 'set', rot })
   hostEl.rotMain.value = String(rot)
-  // 画面上的幻影跟着一起转、一起走。**它不 await**——纯演示，绝不占用机器的时间。
-  // 平移那段的时长就是「移动等待」，所以看上去和机器是同步的。
-  playAssembleAnimation(path)
 
   // 5. 去目标位置，6. 放下（放的过程里会把旋转归零）
   const [tx, ty] = boardToPulses(path.to[0], path.to[1], rect[0], rect[1])
   const to = [Math.round(tx), Math.round(ty)]
+  // 画面上的幻影跟着一起转、一起走。**它不 await**——纯演示，绝不占用机器的时间。
+  // 平移那段的时长用**这一趟实际要等多久**（和下面 moveAndWait 同一个式子），
+  // 所以走得远的那一趟动画也会走得久，和机器同步
+  playAssembleAnimation(path, travelWaitMs(to[0], to[1]).wait)
   hostLog(`   去放 #${path.id}：脉冲(${to[0]}, ${to[1]})`)
   if (await moveAndWait(to[0], to[1], '去放') && !autoAbort) {
     await runPickPlace('place')
@@ -401,6 +454,16 @@ async function autoAssemble() {
     return
   }
   if (!hostConnected) { hostLog('一键拼图：还没连上机器（去设置页连一下）'); return }
+
+  // 上一轮已经拼完了，再点一下 = **从头再拼一遍**（重新校准 + 重新识别）。
+  //
+  // 不这么写的话按钮就死在「已拼完」上了：进度满了以后既不是「继续」（没得继续），
+  // 也不肯从零开始，想再拼一次只能去点「识别一次」——实测反馈
+  // 「拼完之后按钮不会复位，想再次拼不行」就是它。
+  if (autoIndex > 0 && autoIndex >= autoTotal) {
+    hostLog('一键拼图：上一轮拼完了，这一下从头来（重新校准 + 识别）')
+    autoIndex = 0
+  }
 
   // **一口气拼完**，中间不停。想中途收手就点「停止」——停在**步与步之间**，
   // 不会停在半截动作里；进度会留在原地，再点一下从这块接着拼。
@@ -432,10 +495,9 @@ async function autoAssemble() {
     const paths = planPaths(lastResult, ctx.map, ctx.assembly)
     if (!paths.length) { hostLog('一键拼图：没有可搬运的路径'); return }
 
-    if (autoIndex >= paths.length) {
-      hostLog(`一键拼图：${paths.length} 块都拼过了。要重来先重新识别一次（进度会跟着重置）`)
-      return
-    }
+    // 走到这儿还是满的，说明是「续拼」那条路进来的（进度满了但这次没重置）——
+    // 上一轮的收尾里已经把它清零了，这里只是兜一下
+    if (autoIndex >= paths.length) autoIndex = 0
     // 动画画在叠加层上，叠加层关着就什么都看不到——这个坑不说明一下很难自己想到
     if (assemblyAnimEnabled() && el.overlay.classList.contains('hidden')) {
       hostLog('提示：拼图动画开着，但「显示叠加层」是关的，画面上看不到（设置页里打开）')
@@ -540,6 +602,7 @@ async function calibrateAndRecognize() {
     hostLog('校准中断：Y 没发出去')
     return false
   }
+  rememberPosition(null, yTarget)      // 工具现在停在停车位，后面那趟「去取」要从这儿算距离
   // 等机器真的走过去。宁可多等——半路上抓帧的话识别到的是糊的，白做
   await sleepAbortable(waitMs)
   if (autoAbort) return false
@@ -570,7 +633,7 @@ const CAL_DEFAULTS = {
   xMin: 500, xMax: 2200, yMin: 2200, yMax: 25100,
   invertX: false, invertY: false, boardW: 297, boardH: 210,
   calibYPulse: 32000, calibSettleMs: 4000,
-  autoMoveMs: 4000, autoCarryDwellMs: 1000, autoSettleMs: 800, actionStepMs: 700,
+  autoMoveMs: 4000, autoSpeedMmS: 60, autoCarryDwellMs: 1000, autoSettleMs: 800, actionStepMs: 700,
   assemblyGapMm: 2, assemblyAnim: true,
 }
 
@@ -585,6 +648,7 @@ function fillCalibrationForm() {
   hostEl.calBH.value = calibration.boardH
   hostEl.calCalibY.value = calibration.calibYPulse
   hostEl.calCalibWait.value = calibration.calibSettleMs
+  hostEl.calSpeed.value = calibration.autoSpeedMmS
   hostEl.calCarryDwell.value = calibration.autoCarryDwellMs
   hostEl.calSettleDwell.value = calibration.autoSettleMs
   hostEl.calGap.value = calibration.assemblyGapMm
@@ -608,6 +672,7 @@ function applyCalibrationForm() {
   calibration.boardH = num(hostEl.calBH, calibration.boardH)
   calibration.calibYPulse = num(hostEl.calCalibY, calibration.calibYPulse)
   calibration.calibSettleMs = num(hostEl.calCalibWait, calibration.calibSettleMs)
+  calibration.autoSpeedMmS = num(hostEl.calSpeed, calibration.autoSpeedMmS)
   calibration.autoCarryDwellMs = num(hostEl.calCarryDwell, calibration.autoCarryDwellMs)
   calibration.autoSettleMs = num(hostEl.calSettleDwell, calibration.autoSettleMs)
   calibration.assemblyGapMm = num(hostEl.calGap, calibration.assemblyGapMm)
@@ -640,6 +705,7 @@ function updateCalReadout() {
 /** 机器位置一变就重画板面，准星跟着走 */
 function onMachinePose(status) {
   machinePose = { x: status.posX, y: status.posY }
+  rememberPosition(status.posX, status.posY)
   updateCalReadout()
   renderView()
 }
@@ -674,6 +740,7 @@ function onBoardClick(event) {
   const target = { x: Math.round(px), y: Math.round(py) }
   clickTarget = [bx, by]
   renderView()
+  rememberPosition(target.x, target.y)
   hostLog(`点击 → 板面(${xmm.toFixed(0)}, ${ymm.toFixed(0)}) mm → 脉冲(${target.x}, ${target.y})`)
   hostCommand({ cmd: 'set', x: target.x, y: target.y }).then(async () => {
     // 顺手补查一次：ACK 只代表命令**收到**了，位置得另外问。不补这一次的话，
@@ -728,6 +795,7 @@ function wireHostConsole() {
   for (const input of [hostEl.calXMin, hostEl.calXMax, hostEl.calYMin, hostEl.calYMax,
     hostEl.calBW, hostEl.calBH, hostEl.calCalibY, hostEl.calCalibWait,
     hostEl.calCarryDwell, hostEl.calSettleDwell, hostEl.calMoveWait, hostEl.calActionStep,
+    hostEl.calSpeed,
     hostEl.calGap]) {
     input.addEventListener('change', applyCalibrationForm)
   }

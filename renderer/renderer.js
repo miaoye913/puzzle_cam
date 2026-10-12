@@ -763,14 +763,18 @@ function ghostStateAt(path, elapsed, rotMs, moveMs) {
  * **故意不 await**：它是给人看的，绝不能拖慢机器——调用方发完命令就走，
  * 动画自己在 rAF 里按时间跑。下一块开始时会把上一块顶掉。
  */
-function playAssembleAnimation(path) {
+function playAssembleAnimation(path, moveMsOverride) {
   if (!assemblyAnimEnabled()) return
   const base = path?.sourcePolygon
   if (!base?.length || !path.from || !path.to) return
   if (animRaf) cancelAnimationFrame(animRaf)
 
   const rotMs = animRotMs(path.dRot)
-  const moveMs = Math.max(0, Math.round(Number(calibration.autoMoveMs) || 0))
+  // 平移那一段的时长要**和机器实际等的时间一样**：等待是按这一趟多远算出来的
+  // （见 host-console 的 travelWaitMs），不是那个固定的「移动等待」——不然走得远的那趟
+  //（比如从停车位回来的第一趟）机器还在走、画面上的幻影已经落位了，两边对不上
+  const moveMs = Math.max(0, Math.round(Number(
+    moveMsOverride !== undefined ? moveMsOverride : calibration.autoMoveMs) || 0))
   const t0 = performance.now()
   animGhost = {
     id: path.id,
