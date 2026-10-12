@@ -1099,7 +1099,12 @@ function visionStatsText(result) {
   }
 
   const board = result.board.found ? '拼板已定位' : '未找到拼板'
-  const parts = [board, `${result.pieces.length} 块`, `${result.timing_ms.toFixed(1)}ms`]
+  // 这一场是按纯色抠的还是按花纹抠的（侧车自己判的），带上占比。
+  // 摆在状态栏是有意的——判错了得让人一眼看见，不然就是个黑盒
+  const mode = result.piece_mode === 'pattern'
+    ? `花纹 ${((result.piece_mode_detail?.ink_ratio ?? 0) * 100).toFixed(0)}%`
+    : '纯色'
+  const parts = [board, mode, `${result.pieces.length} 块`, `${result.timing_ms.toFixed(1)}ms`]
   const redCount = (result.lines ?? []).filter((line) => line.red).length
   if (result.lines?.length) parts.push(redCount ? `${result.lines.length} 条线（红 ${redCount}）` : `${result.lines.length} 条线`)
   if (result.fps) parts.push(`${result.fps}fps`)

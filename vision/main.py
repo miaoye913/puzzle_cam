@@ -251,6 +251,12 @@ def report(result):
               f"角度{line['angle']:.1f}° rgb{tuple(rgb)}"
               f"{'  ← 判定为红色' if line['red'] else ''}", file=sys.stderr)
 
+    detail = result.get('piece_mode_detail') or {}
+    print(f"  判型 : {'花纹（碎片上有印刷，按「不是板面颜色」抠）' if result.get('piece_mode') == 'pattern' else '纯色（按碎片颜色抠）'}"
+          f"　碎片内部非主色像素占 {detail.get('ink_ratio', 0):.3f}"
+          f"（门槛 {pipeline.PIECE_MODE_INK_RATIO}，各块 {detail.get('per_piece')}）",
+          file=sys.stderr)
+
     assembly = result.get('assembly')
     if assembly:
         how = '边匹配（真凑成矩形）' if assembly.get('strict') else '打分搜索兜底（未必是矩形）'
@@ -399,6 +405,97 @@ def _selftest_assembly():
     return problems
 
 
+def _selftest_pattern():
+    """
+    花纹（扑克牌）那一套：合成一张「绿板 + 四块印了花的卡片」，验证
+
+      1. 判型认得出这是花纹；
+      2. 每块都还是**四条边、四个角接近 90°**——印刷没有在轮廓上啃出缺口；
+      3. 多边形面积贴合卡片本身的面积（丢角就会明显偏小）。
+
+    这条是「纯色那套抠花纹块会崩」的回归：同一张图硬走纯色掩膜，
+    实测会冒出 16°/46° 的假角、顶点数从 4 涨到 7（在下面顺带打出来做对照）。
+
+    花色必须**被卡片的边裁掉**（画在 ROI 里，超出部分自然没了）——实物就是这样，
+    刀切过之后墨只留在块的里面、紧贴着切边。把花色画到卡片外面去是不对的：
+    那不是「印在切边上的花」，那是往板子上画了个点。
+    """
+    problems = []
+    frame = np.full((720, 1280, 3), 210, np.uint8)
+    cv2.fillConvexPoly(frame, np.array([[200, 120], [1050, 90], [1090, 640], [170, 660]], np.int32),
+                       (60, 200, 60))
+    boxes = [(300, 200, 500, 330), (620, 180, 800, 320),
+             (330, 400, 500, 525), (630, 415, 810, 545)]
+    black, red = (20, 20, 20), (30, 30, 210)
+
+    def card(box, marks):
+        x0, y0, x1, y1 = box
+        roi = frame[y0:y1, x0:x1]
+        roi[:] = (248, 248, 248)
+        layer = np.zeros_like(roi)
+        for kind, args in marks:
+            if kind == 'dot':
+                cv2.circle(layer, args[0], args[1], args[2], -1)
+            else:
+                cv2.rectangle(layer, args[0], args[1], args[2], -1)
+        hit = cv2.cvtColor(layer, cv2.COLOR_BGR2GRAY) > 0
+        roi[hit] = layer[hit]
+
+    # 两块的花色正好压在切边上（局部坐标 x=0 / y=0 那两个点会被裁掉一半）
+    card(boxes[0], [('dot', ((0, 65), 30, black)), ('dot', ((150, 100), 18, red))])
+    card(boxes[1], [('dot', ((60, 70), 26, red)), ('rect', ((140, 30), (180, 60), black))])
+    card(boxes[2], [('dot', ((70, 60), 24, red)), ('rect', ((20, 92), (140, 108), black))])
+    card(boxes[3], [('dot', ((70, 0), 30, black)), ('rect', ((90, 15), (160, 50), red))])
+
+    saved_budget = pipeline.ASSEMBLY_TIME_BUDGET
+    pipeline.ASSEMBLY_TIME_BUDGET = 2.0
+    try:
+        result = analyze(frame)
+    finally:
+        pipeline.ASSEMBLY_TIME_BUDGET = saved_budget
+
+    detail = result.get('piece_mode_detail') or {}
+    print(f"  花纹 : 判型 {result.get('piece_mode')}（印花占比 {detail.get('ink_ratio')}）",
+          file=sys.stderr)
+    if result.get('piece_mode') != 'pattern':
+        problems.append(f"卡片图没被判成花纹，判成了 {result.get('piece_mode')}"
+                        f"（印花占比 {detail.get('ink_ratio')}）")
+    if len(result['pieces']) != len(boxes):
+        problems.append(f'卡片数量不符：期望 {len(boxes)}，实际 {len(result["pieces"])}')
+        return problems
+
+    # 每块配回它自己那张卡片：**按重心就近配，不能按 id**——pieces 是按面积从大到小
+    # 排过序的，id 和 boxes 的顺序对不上（第一版就是这里配错了，报出 79% 的假失败）
+    bad = 0
+    for piece in result['pieces']:
+        # 面积一律在**原图坐标**里比：卡片是画在原图上的。
+        # （piece['area'] 是矫正空间的面积，拿它比原图的框是两套单位，第一版就这么错的）
+        poly = np.array(piece['polygon'], np.float32).reshape(-1, 1, 2)
+        n = len(piece['polygon'])
+        angles = [round(float(a)) for a in piece['angles']]
+        # 卡片是方的：四条边、四个角都该接近 90°。印刷啃出缺口就会多出假角
+        if n != 4:
+            problems.append(f"#{piece['id']} 卡片抠出了 {n} 条边（该是 4）：内角 {angles}")
+            bad += 1
+            continue
+        worst = max(abs(a - 90.0) for a in angles)
+        if worst > 12.0:
+            problems.append(f"#{piece['id']} 有角不接近 90°：{angles}")
+            bad += 1
+        cx, cy = piece['center']
+        box = min(boxes, key=lambda b: (0.5 * (b[0] + b[2]) - cx) ** 2
+                  + (0.5 * (b[1] + b[3]) - cy) ** 2)
+        want = abs((box[2] - box[0]) * (box[3] - box[1]))
+        got = abs(cv2.contourArea(poly))
+        if got < 0.95 * want:
+            problems.append(f"#{piece['id']} 多边形面积只有卡片的 {got / want * 100:.0f}%"
+                            f"（印刷把轮廓啃缺了）")
+            bad += 1
+    print(f"  花纹 : {len(result['pieces'])} 块卡片，"
+          f"{'边数/角度/面积都对得上' if not bad else f'{bad} 项不对'}", file=sys.stderr)
+    return problems
+
+
 def run_selftest():
     """
     合成一张「绿板 + 白块 + 一条红线」的图，验证算法本身没被改坏。
@@ -410,6 +507,8 @@ def run_selftest():
         整个拒掉，多边形只剩区域面积的 85%。面积校验就是冲它来的。
         注意必须做得**小**：削掉的角是固定的像素量，而 epsilon 跟周长成正比，
         块越小削掉的比例越大，所以这个 bug 只在小块上现形。
+
+    这张图也是**纯色判型**的反向用例：必须判成 solid，而且各块多边形要和改动前一致。
     """
     frame = np.full((720, 1280, 3), 210, np.uint8)          # 浅色桌面
     cv2.fillConvexPoly(frame, np.array([[200, 120], [1050, 90], [1090, 640], [170, 660]], np.int32),
@@ -434,7 +533,7 @@ def run_selftest():
     line_x = 700
     cv2.line(frame, (line_x, 180), (line_x, 620), (0, 0, 255), 5)
 
-    problems = _selftest_assembly()
+    problems = _selftest_assembly() + _selftest_pattern()
 
     # 自测不必等满拼接预算，不然每跑一次都要十几秒
     saved_budget = pipeline.ASSEMBLY_TIME_BUDGET
@@ -443,6 +542,13 @@ def run_selftest():
         result = analyze(frame)
     finally:
         pipeline.ASSEMBLY_TIME_BUDGET = saved_budget
+
+    # 纯色判型的反向用例：这张图上全是实心白块，必须判成 solid。
+    # 判成花纹不至于崩（花纹那套抠实心块一样能抠对），但那是白白绕远路，
+    # 而且说明判据已经不认得了——真要出现就得看一眼。
+    if result.get('piece_mode') != 'solid':
+        problems.append(f"这张纯色图被判成了 {result.get('piece_mode')}"
+                        f"（印花占比 {result.get('piece_mode_detail', {}).get('ink_ratio')}）")
 
     if not result['board']['found']:
         problems.append('没找到绿板')

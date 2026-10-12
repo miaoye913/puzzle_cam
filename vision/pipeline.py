@@ -27,6 +27,32 @@ BOARD_HSV_HIGH = np.array([85, 255, 255], np.uint8)
 PIECE_HSV_LOW = np.array([0, 0, 185], np.uint8)
 PIECE_HSV_HIGH = np.array([180, 95, 255], np.uint8)
 
+# ── 纯色 / 花纹 两套识别 ────────────────────────────────────────────
+# 纯色那套按「碎片是什么颜色」抠（上面那两个常量）；花纹那套按「不是板面颜色」抠。
+#
+# 花纹那套把亮度的下限**压低**：绿板面上的阴影色相还在、饱和度还在，只是暗，
+# 压低之后阴影就算板面、不算碎片。不压的话一块白块周围会裹着一圈阴影，
+# 判型那一步会把阴影当成印花。饱和度下限一个字不动——**墨是暗且淡的**，
+# 靠 S 低把它留在前景里。
+PATTERN_BOARD_V = 30          # 花纹那套认板面的亮度下限（纯色那套用 BOARD_HSV_LOW 的 80）
+PATTERN_OPEN = 9              # 开运算核：要比板面上记号线的宽度大（实测线宽 6.9px）
+PATTERN_DARK_GAIN = 0.58      # 「很暗的墨」补回前景：亮度低于板面中位亮度的这个比例
+PATTERN_DARK_MIN = 45
+PATTERN_DARK_MAX = 105
+PATTERN_DARK_S = 110          # 补墨时还要求「淡」——绿板面的阴影暗但饱和度高，别把它补进来
+# 判型：碎片内部有多少像素不属于这一块自己的主色。实心块≈0，扑克牌几个百分点到十几。
+#
+# 门槛取得**偏低**是有意的，两边代价不对称：
+#   判成花纹而其实是纯色 —— 花纹那套抠实心块一样能抠对（实测同一帧：块数、顶点数一样，
+#   面积差 1~2%），几乎没损失；
+#   判成纯色而其实是花纹 —— 印刷会在轮廓上啃出缺口，实测合成卡片上冒出 16°/46° 的假角、
+#   顶点数从 4 涨到 7，后面按边长匹配直接崩。
+# 实测：真实那一帧的纯白块 = 0.000；合成卡片 = 0.155（每块 0.09~0.22）。
+PIECE_MODE_INK_RATIO = 0.06
+PIECE_MODE_FAR_S = 60         # 离主色这么远的饱和度差算「印花」
+PIECE_MODE_FAR_V = 60         # 亮度差同理（黑墨靠它抓）
+PIECE_MODE_ERODE = 5          # 统计前先腐蚀这么多，避开描边/阴影/JPEG 过渡带
+
 # ── 面积门槛（都按比例给，和输入分辨率无关）────────────────────────────
 MIN_BOARD_RATIO = 0.02        # 拼板小于画面 2% 就当没找到
 MIN_PIECE_BOARD_RATIO = 0.002  # 单块小于板面积 0.2% 视为噪点
@@ -429,10 +455,107 @@ def piece_mask(warped_hsv, shape):
     return cv2.bitwise_and(mask, border)
 
 
+def patterned_piece_mask(warped_hsv, shape):
+    """
+    矫正图上的**花纹块**掩膜（扑克牌那类）。
+
+    和上面那套的区别就在「按什么抠」：纯色那套按**碎片是什么颜色**（白、低饱和、亮），
+    花纹块上有印刷、墨不是白的——**印在切边上的那道墨会在轮廓上啃出缺口**，
+    简化出来的多边形就是错的，后面按边长匹配自然全线崩。
+
+    所以这里反过来，按**不是板面颜色**抠：牌面的白纸、黑红花色都不在绿板面的范围内，
+    整个块是连通的。两处细节：
+
+      - **阴影算板面**：阴影色相还在、饱和度还在，只是暗，所以把亮度下限压低
+        （`PATTERN_BOARD_V`）。不限的话每块周围裹一圈阴影，判型那一步会把阴影当印花。
+      - **开运算的核要比板面上的记号线宽**：板面那条红记号也是「非板面颜色」，
+        核不够大会多出一个假碎片。开大一点削掉的块角，后面 `simplify_polygon()` 的
+        直线重拟合会把尖角还回来。
+    """
+    h, w = shape[:2]
+    board_low = np.array([BOARD_HSV_LOW[0], BOARD_HSV_LOW[1], PATTERN_BOARD_V], np.uint8)
+    background = cv2.inRange(warped_hsv, board_low, BOARD_HSV_HIGH)
+    mask = cv2.bitwise_not(background)
+
+    # 很暗的墨再补一次：阈值跟着板面亮度走（换板子、换灯光不用重调），
+    # 但**要求它同时是淡的**——绿板面的阴影又暗又饱和，不能被补进来
+    board_v = warped_hsv[:, :, 2][background > 0]
+    if board_v.size:
+        limit = float(np.clip(np.median(board_v) * PATTERN_DARK_GAIN,
+                              PATTERN_DARK_MIN, PATTERN_DARK_MAX))
+        dark_ink = ((warped_hsv[:, :, 2] <= limit) &
+                    (warped_hsv[:, :, 1] <= PATTERN_DARK_S)).astype(np.uint8) * 255
+        mask = cv2.bitwise_or(mask, dark_ink)
+
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                            np.ones((PATTERN_OPEN, PATTERN_OPEN), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, KERNEL)
+
+    border = np.zeros((h, w), np.uint8)
+    cv2.rectangle(border, (BOARD_INSET, BOARD_INSET), (w - 1 - BOARD_INSET, h - 1 - BOARD_INSET), 255, -1)
+    return cv2.bitwise_and(mask, border)
+
+
+def classify_piece_mode(warped_hsv, labels, count):
+    """
+    这一场该走纯色那套还是花纹那套。返回 (mode, detail)，mode 是 'solid' / 'pattern'。
+
+    判据不看绝对颜色——那样「一块实心红」会被当成花纹——而是看
+    **每块碎片内部有多少像素不属于这一块自己的主色**：
+
+      - 实心块：不管什么颜色，内部像素都贴着主色，占比 ≈ 0
+      - 扑克牌：白纸 + 黑红印刷，印刷那部分离主色很远，占比几个百分点到十几
+
+    只看 (S, V) 不看 H：白纸的色相没有意义（饱和度接近 0 时 H 纯粹是噪声），
+    拿 H 去比是白块上最容易踩的坑。
+
+    labels/count 要用 `patterned_piece_mask()` 分开的那一份：**不能用纯色那套的**，
+    因为纯色掩膜本来就把墨排除在外了，拿它统计等于「问一个看不见墨的掩膜有没有墨」。
+    """
+    kernel = np.ones((PIECE_MODE_ERODE * 2 + 1,) * 2, np.uint8)
+    total = 0
+    far_total = 0
+    per_piece = []
+    for label in range(1, count + 1):
+        region = (labels == label).astype(np.uint8)
+        inner = cv2.erode(region, kernel)
+        if int(cv2.countNonZero(inner)) < 64:      # 小块就别腐蚀了，免得把自己腐蚀没了
+            inner = region
+        pixels = warped_hsv[inner > 0]
+        if pixels.size == 0:
+            continue
+        s = pixels[:, 1].astype(np.int32)
+        v = pixels[:, 2].astype(np.int32)
+        far = ((np.abs(s - int(np.median(s))) > PIECE_MODE_FAR_S) |
+               (np.abs(v - int(np.median(v))) > PIECE_MODE_FAR_V))
+        total += int(pixels.shape[0])
+        far_total += int(np.count_nonzero(far))
+        per_piece.append(round(float(far.mean()), 4))
+
+    ratio = (far_total / total) if total else 0.0
+    mode = 'pattern' if ratio > PIECE_MODE_INK_RATIO else 'solid'
+    return mode, {'ink_ratio': round(ratio, 4), 'per_piece': per_piece}
+
+
 def find_pieces(warped_hsv, min_area):
-    """在矫正后的板面上找白色块，返回 [{'center','area','rect','polygon','angles'}, ...]。"""
-    mask = piece_mask(warped_hsv, warped_hsv.shape)
-    labels, count = split_pieces(mask, min_area)
+    """
+    在矫正后的板面上找碎片。返回 `(pieces, mode, detail)`。
+
+    两段式：先用「不是板面颜色」抠一遍**判型**（纯色 / 花纹），再按判出来的那一型挑掩膜。
+
+    **判型必须用「不是板面颜色」那一份**，不能用纯色那份——纯色掩膜本来就把印花排在
+    外面了，拿它统计等于问一个看不见墨的掩膜「你上面有墨吗」，永远答没有。
+
+    纯色那一场仍旧走 `piece_mask()`（一个像素都没变，零回归）；只有判成花纹才换成
+    `patterned_piece_mask()`，而它上面已经算好了，直接用。
+    """
+    coarse = patterned_piece_mask(warped_hsv, warped_hsv.shape)
+    labels, count = split_pieces(coarse, min_area)
+    mode, detail = classify_piece_mode(warped_hsv, labels, count)
+
+    if mode == 'solid':
+        mask = piece_mask(warped_hsv, warped_hsv.shape)
+        labels, count = split_pieces(mask, min_area)
 
     pieces = []
     for label in range(1, count + 1):
@@ -475,7 +598,7 @@ def find_pieces(warped_hsv, min_area):
     pieces.sort(key=lambda p: -p['area'])
     for index, piece in enumerate(pieces):
         piece['id'] = index
-    return pieces
+    return pieces, mode, detail
 
 
 def find_lines(warped_bgr, warped_hsv, occupied, min_area):
@@ -602,6 +725,9 @@ def analyze(frame, preview=False):
             'pieces': [],
             'lines': [],
             'assembly': None,
+            # 没找到板面也就谈不上判型，给个默认值，前端不用分情况
+            'piece_mode': 'solid',
+            'piece_mode_detail': None,
             'timing_ms': round((time.perf_counter() - started) * 1000, 2),
         }
 
@@ -610,7 +736,7 @@ def analyze(frame, preview=False):
     h_inv = np.linalg.inv(matrix)
 
     min_piece = MIN_PIECE_BOARD_RATIO * rw * rh
-    pieces = find_pieces(warped_hsv, min_piece)
+    pieces, piece_mode, piece_mode_detail = find_pieces(warped_hsv, min_piece)
 
     # 拼接要用**矫正空间**的多边形（那才是碎片的真实形状），所以赶在坐标映射回原图之前算。
     # 传进去的顺序就是 pieces 的顺序，solve() 会把每块原来排第几个一并带回来。
@@ -661,6 +787,10 @@ def analyze(frame, preview=False):
         'pieces': pieces,
         'lines': lines,
         'assembly': assembled,
+        # 这一场是按纯色抠的还是按花纹抠的（自动判的），以及判据的实测值。
+        # 摆在结果里是**故意的**：判错了得让人一眼看见，不然就是个黑盒
+        'piece_mode': piece_mode,
+        'piece_mode_detail': piece_mode_detail,
         'timing_ms': round((time.perf_counter() - started) * 1000, 2),
     }
 
