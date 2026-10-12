@@ -1,7 +1,12 @@
 """
 碎片拼接：把识别到的几块碎片摆成一个矩形。
 
-思路参考了公开的 2026 电赛 E 题解法（NUEDC-2026-E，GPL-3.0）的**做法**：
+**这个文件现在是退路，主路径在 `assembly_edge.py`**（边长 + 角度匹配 + 回溯，只认真的
+凑成矩形的摆法）。下面这套打分搜索只在 `solve(fallback=True)` 时才走，结果里标
+`strict = False`——因为它**不保证结果是矩形**，而一个错的结果比没有结果有害得多：
+它会被画到屏幕上，机器还会照着摆。
+
+这一套的思路参考了公开的 2026 电赛 E 题解法（NUEDC-2026-E，GPL-3.0）的**做法**：
 不要「先猜一个摆法，再判断它是不是矩形」，而是**束搜索**——每步把所有能放的摆法都生成出来，
 按「离矩形有多近」打分，只留下最好的若干条继续，最后取分最高的那条。
 代码是自己写的，没有复制对方的实现。
@@ -22,6 +27,8 @@ import time
 
 import numpy as np
 import cv2
+
+import assembly_edge
 
 # 边长匹配的相对容差：两条边长度差超过它就不考虑贴在一起
 EDGE_TOLERANCE = 0.45
@@ -47,6 +54,13 @@ OVERLAP_RATIO = 0.025
 ASPECT_RANGE = (0.95, 1.30, 0.01)
 # 整个拼接的时间预算（秒）
 TIME_BUDGET_S = 12.0
+# 边匹配那套的边长容差，从紧到松试。
+#
+# 为什么要有这个梯子：容差就是「这两条边算不算同一条」的宽容度，卡得越紧，配上的越可信。
+# 实测本项目的数据上，紧于 3mm 就一个都配不上了（掩膜边界比实物大 3px 左右，而边上
+# 相邻两块的角不一样，膨胀出来的长度差得不一样，误差就在 3mm 这个量级）。
+# 所以从 3mm 起试，成了就用它——那一档配出来的摆法最紧；不成再放宽一档兜底。
+EDGE_TOL_LADDER_MM = (3.0, 5.0, 8.0)
 
 
 def _ccw(poly):
@@ -351,14 +365,79 @@ def _shrink_poly(poly, d):
     return np.array(out, np.float64)
 
 
-def solve(pieces, aspect=None, shrink=None, beam_width=None, time_budget=None, node_log=None):
+def _solve_by_edges(polys, board_w_px, budget, node_log):
     """
-    把碎片拼成矩形。返回最接近矩形的那组摆法（附打分），拼不出来返回 None。
+    边匹配那一套（见 assembly_edge）。**边长容差从紧到松试几档**，先成的那档就作数：
+    容差越紧配出来的摆法越可信，所以宁可先试紧的。
 
-    pieces: [Nx2 的 ndarray, ...]，每块的多边形，同一坐标系。
+    返回的字典和束搜索那套**同一个形状**，前端不用分情况；多一个 `strict` 字段标明
+    这是「真凑成矩形」的那种（束搜索那套是 `strict = False`）。
+    """
+    px_per_mm = (board_w_px / assembly_edge.BOARD_W_MM) if board_w_px else None
+    overall = time.perf_counter() + budget
+    got = None
+    for tol_mm in EDGE_TOL_LADDER_MM:
+        if time.perf_counter() > overall:
+            break
+        got = assembly_edge.assemble(
+            [np.asarray(p, np.float64) for p in polys],
+            px_per_mm=px_per_mm,
+            # 每一档单独限时：三档加起来别超过整个预算的一半多。正常情况第一档
+            # 几百毫秒就出结果了，这个上限是给「怎么都拼不出来」那种情况兜底的
+            time_budget=max(1.5, min(budget / 4.0, 3.0)),
+            node_log=node_log,
+            length_tol_mm=tol_mm,
+        )
+        if got is not None:
+            if node_log is not None:
+                node_log.append(f'  边匹配：边长容差 {tol_mm:.1f}mm 这档成了')
+            break
+    if got is None:
+        return None
 
-    注意返回的是**搜索到的最优摆法**，不是「经过证明的完美矩形」——真实数据有测量误差，
-    要求完美闭合等于永远搜不到。判断质量看返回里的 fill / outer_vertices / score。
+    ids = [pid for pid, _v, _r in got['placed']]
+    placed = [np.asarray(v, np.float64) for _p, v, _r in got['placed']]
+    rots = [np.asarray(r, np.float64) for _p, _v, r in got['placed']]
+    placements, size, norm_rot = _normalize(placed)
+
+    cand = {
+        'size': [round(size[0], 1), round(size[1], 1)],
+        'aspect': 1.0,
+        'shrink_px': 0.0,
+        'placements': [{
+            'index': int(ids[i]),
+            'polygon': [[round(float(x), 1), round(float(y), 1)] for x, y in placements[i]],
+            # 这块相对它自己原始形状一共要转多少度 = 求解时的旋转 ∘ 摆正时的旋转
+            'rot_deg': round(float(np.degrees(np.arctan2(
+                (norm_rot @ rots[i])[1, 0], (norm_rot @ rots[i])[0, 0]))), 1),
+        } for i in range(len(placements))],
+        'strict': True,
+    }
+    # 打分沿用下面那套的算法，界面上两个数才可比
+    score, metrics = _final_score(placements, [_area(p) for p in placements])
+    cand['score'] = round(float(score), 4)
+    cand['fill'] = round(float(metrics.get('fill', 0.0)), 4)
+    cand['outer_vertices'] = int(metrics.get('outer_vertices', 0))
+    return cand
+
+
+def solve(pieces, aspect=None, shrink=None, beam_width=None, time_budget=None, node_log=None,
+          board_w_px=None, fallback=False):
+    """
+    把碎片拼成矩形。**拼不出来就返回 None**，不拿「看着像」的东西凑数。
+
+    主路径是 `assembly_edge`（边匹配 + 回溯）：它只认**真的凑成矩形**的摆法。
+    凑不出来就报没有——实测反馈的「拼出来的矩形不对」，根子就在下面那套打分搜索上：
+    打分函数里「离矩形有多近」只是一项扣分，摆错的方案照样能排到前面，于是它总能
+    交出一个东西来，而那个东西未必是矩形。
+
+    `fallback=True` 才会在边匹配失败时退回那套束搜索 + 打分兜底，结果里标
+    `strict = False`。默认关：**宁可说拼不出来，也不给一个错的**——错的那个会被
+    画到屏幕上、还会被机器照着摆，比「没有结果」有害得多。
+
+    pieces: [Nx2 的 ndarray, ...]，每块的多边形，同一坐标系（板面像素）。
+    board_w_px: 板面在矫正图里有多宽（像素）。边匹配的容差是毫米级的物理量，
+                要靠它折算；不给就按碎片总面积估一个，精度差些但能用。
     """
     polys = [_ccw(p) for p in pieces]
     if not 2 <= len(polys) <= 6:
@@ -366,6 +445,19 @@ def solve(pieces, aspect=None, shrink=None, beam_width=None, time_budget=None, n
     budget = time_budget or TIME_BUDGET_S
     deadline = time.perf_counter() + budget
     width = beam_width or BEAM_WIDTH
+
+    # 显式指定了 aspect/shrink/beam_width 的调用（想扫参数、做对比的那种）直接走老路，
+    # 免得被新算法拦掉
+    if aspect is None and shrink is None and beam_width is None:
+        strict = _solve_by_edges(polys, board_w_px, budget, node_log)
+        if strict is not None:
+            return strict
+        if not fallback:
+            if node_log is not None:
+                node_log.append('  边匹配没找到能凑成矩形的摆法，到此为止（不拿打分搜索凑一个）')
+            return None
+        if node_log is not None:
+            node_log.append('  边匹配没找到矩形，退回束搜索 + 打分兜底（这个结果未必是矩形）')
 
     # 默认就用矫正后的原始比例。早先以为要一起搜拉伸系数，那是被「精确匹配」的搜索方式
     # 逼出来的——打分式的束搜索在 s=1.0 上直接就把 4 个外轮廓顶点的摆法找出来了。
@@ -401,6 +493,8 @@ def solve(pieces, aspect=None, shrink=None, beam_width=None, time_budget=None, n
                         'rot_deg': round(float(np.degrees(np.arctan2(
                             (norm_rot @ rots[i])[1, 0], (norm_rot @ rots[i])[0, 0]))), 1),
                     } for i, p in enumerate(placements)],
+                    # 打分搜索只是「挑个最不难看的」，不保证是矩形
+                    'strict': False,
                 }
                 if node_log is not None:
                     node_log.append(

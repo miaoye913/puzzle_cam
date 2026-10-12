@@ -616,8 +616,10 @@ def analyze(frame, preview=False):
     # 传进去的顺序就是 pieces 的顺序，solve() 会把每块原来排第几个一并带回来。
     assembled = None
     if ASSEMBLY_ENABLE and 2 <= len(pieces) <= ASSEMBLY_MAX_PIECES:
+        # board_w_px 是给「边匹配」那套折算容差用的：容差是毫米级的物理量，
+        # 而板子是 A4（297mm），有了板宽就知道这里 1 毫米是多少像素
         assembled = assembly.solve([np.array(p['polygon'], np.float64) for p in pieces],
-                                   time_budget=ASSEMBLY_TIME_BUDGET)
+                                   time_budget=ASSEMBLY_TIME_BUDGET, board_w_px=rw)
         if assembled is not None:
             for item in assembled['placements']:
                 item['id'] = pieces[item['index']]['id']

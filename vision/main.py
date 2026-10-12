@@ -253,8 +253,9 @@ def report(result):
 
     assembly = result.get('assembly')
     if assembly:
+        how = '边匹配（真凑成矩形）' if assembly.get('strict') else '打分搜索兜底（未必是矩形）'
         print(f"  拼接 : 拼成 {assembly['size'][0]:.0f}×{assembly['size'][1]:.0f} 矩形"
-              f"（外轮廓 {assembly['outer_vertices']} 个顶点，填充率 {assembly['fill']:.4f}，"
+              f"（{how}，外轮廓 {assembly['outer_vertices']} 个顶点，填充率 {assembly['fill']:.4f}，"
               f"碎块内缩 {assembly['shrink_px']}px，总分 {assembly['score']}）", file=sys.stderr)
         for item in assembly['placements']:
             print(f"    #{item['id']} 落在 "
@@ -374,6 +375,27 @@ def _selftest_assembly():
         problems.append('拼出来的碎块编号不是 0..3，块对应错了')
     print(f"  拼接 : 合成剖分还原成 {got['size'][0]:.0f}×{got['size'][1]:.0f}"
           f"（应 {240}×{150}，填充率 {got['fill']:.4f}）", file=sys.stderr)
+
+    # 拼不成矩形的四块**必须**明确返回 None。
+    #
+    # 这条是「拼出来的矩形不对」那件事的回归测试：原来那套打分搜索不管三七二十一
+    # 总能挑出一个「最不难看」的摆法交出来，于是摆得乱七八糟的结果照样被画到屏幕上、
+    # 机器照样照着摆。现在要求「要么是真矩形，要么说没有」。
+    junk = [
+        np.array([[0, 0], [200, 0], [140, 40]], np.float64),                     # 细长三角
+        np.array([[0, 120], [60, 120], [30, 170]], np.float64),                  # 小三角
+        np.array([[200, 200], [330, 210], [340, 300], [210, 290]], np.float64),  # 方块
+        np.array([[500, 60], [560, 20], [600, 90], [540, 130]], np.float64),     # 菱形
+    ]
+    junk_got = assembly.solve([p.copy() for p in junk], time_budget=10.0)
+    if junk_got is None:
+        print('  拼接 : 拼不成矩形的四块 → 明确报「拼不出来」（对）', file=sys.stderr)
+    elif junk_got['fill'] < 0.95:
+        problems.append(f"拼不成矩形的四块给出了结果 {junk_got['size']}"
+                        f"（填充率只有 {junk_got['fill']:.4f}）—— 这就是「拼错了还照样摆」")
+    else:
+        print(f"  拼接 : 这四块居然拼出了 {junk_got['fill']:.4f} 的矩形，值得看一眼",
+              file=sys.stderr)
     return problems
 
 
