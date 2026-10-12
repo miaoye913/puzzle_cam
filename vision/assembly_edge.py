@@ -52,6 +52,16 @@ DEFAULTS = {
 MAX_NODES = 20000
 TIME_BUDGET_S = 6.0
 
+# 进来之前先把碎片多边形「洗干净」用的阈值，和 pipeline.simplify_polygon 那套保持一致。
+#
+# 为什么非洗不可：这套算法是拿**整条边**去配的。一条直边中间只要多出一个顶点（内角
+# 180°），这条边就被切成两半，两边都对不上任何一条完整的边了——**几何形状其实没变**，
+# 但搜索会直接判死。实测：给这四块每块插进去几个直边中点，求解器 7ms 就返回 None；
+# 洗一遍回到 4/3/4/4 个顶点，立刻又能拼出来。
+COLLINEAR_DEG = 160.0        # 内角大于它 = 其实是直边上的抖动
+SHORT_EDGE_RATIO = 0.25      # 边短到相邻边的这个比例以下，才**考虑**合并
+TINY_AREA_RATIO = 0.015      # 并掉这条边造成的面积变化低于整块的这个比例，才算「不承载形状」
+
 
 # ── 小工具 ──────────────────────────────────────────────────────────
 
@@ -91,6 +101,91 @@ def _edge_lengths(verts):
 def _signed_area(verts):
     x, y = verts[:, 0], verts[:, 1]
     return float((np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) * 0.5)
+
+
+def _line_cross(p1, u, p2, v):
+    """两条直线（点 + 方向）的交点；平行就返回 None"""
+    den = u[0] * v[1] - u[1] * v[0]
+    if abs(den) < 1e-9:
+        return None
+    t = ((p2[0] - p1[0]) * v[1] - (p2[1] - p1[1]) * v[0]) / den
+    return p1 + t * u
+
+
+def _clean_polygon(poly):
+    """
+    把碎片多边形洗成「只剩真正的角点」。两步，反复做：
+
+      ① 内角大过 `COLLINEAR_DEG` 的顶点——那其实落在直边上，是采样抖动。
+         不删掉的话一条边会被切成两段，边长匹配整条全废。
+      ② 不承载形状的超短边——真角点被噪声拆成两个时，两个内角都没到共线的程度，
+         ① 删不掉它们。这时把这条短边两端的顶点换成两条邻边延长线的交点。
+
+    ② 的判据不能只看「这条边短不短」：**形状上真的有一条很短的边**（实测那块细长条的
+    一条边只有 23px，而邻边 104px）也会满足长度比例，一刀切下去就把真角点吃掉了——
+    踩过这个坑，代价是原本能拼出来的那组直接变成拼不出来。所以照 pipeline 的判据来：
+    把这条短边换成一个点，**看面积变了多少**。真边一去掉面积立刻变化一大截；
+    噪声造出来的假边去掉后几乎没变化。
+
+    和 pipeline.simplify_polygon 是同一件事，这里再来一遍是**兜底**：识别那边已经洗过了，
+    但求解器不该依赖「上游一定洗干净了」——真漏一个顶点进来，代价是整个拼不出来。
+    洗干净的输入过一遍完全不变（幂等），所以不会把好数据改坏。
+    """
+    pts = [np.asarray(p, np.float64) for p in poly]
+    # 每删掉/并掉一个顶点就重头扫一遍（下标会挪），所以圈数要够：一圈最少去掉一个
+    for _ in range(2 * len(pts) + 8):
+        if len(pts) <= 3:
+            break
+        # ① 近共线顶点
+        dropped = False
+        for i in range(len(pts)):
+            prev, cur, nxt = pts[(i - 1) % len(pts)], pts[i], pts[(i + 1) % len(pts)]
+            back, forth = _unit(prev - cur), _unit(nxt - cur)
+            if back is None or forth is None:
+                del pts[i]
+                dropped = True
+                break
+            angle = np.degrees(np.arccos(np.clip(float(np.dot(back, forth)), -1.0, 1.0)))
+            if angle > COLLINEAR_DEG:
+                del pts[i]
+                dropped = True
+                break
+        if dropped:
+            continue
+
+        # ② 超短边：先按长度比例粗筛，再**看面积**——真边一去掉面积立刻变化一大截
+        n = len(pts)
+        area = abs(_signed_area(np.asarray(pts, np.float64)))
+        if n <= 3 or area <= 0:
+            break
+        lens = [float(np.linalg.norm(pts[(i + 1) % n] - pts[i])) for i in range(n)]
+        merged = False
+        for i in range(n):
+            j = (i + 1) % n
+            if lens[i] > SHORT_EDGE_RATIO * min(lens[i - 1], lens[j]):
+                continue
+            a, b = pts[(i - 1) % n], pts[i]
+            c, d = pts[j], pts[(j + 1) % n]
+            u, v = _unit(b - a), _unit(d - c)
+            if u is None or v is None:
+                continue
+            hit = _line_cross(a, u, c, v)
+            # 交点飞得太远说明这两条邻边快平行了，那不是「短边残渣」，别动它
+            if hit is None or max(float(np.linalg.norm(hit - b)),
+                                  float(np.linalg.norm(hit - c))) > 4.0 * lens[i]:
+                continue
+            # 这块被「抹平」的三角形占整块多大：够小才说明这条边不承载形状
+            if abs(cv2.contourArea(np.asarray([b, hit, c], np.float32).reshape(-1, 1, 2))) \
+                    >= TINY_AREA_RATIO * area:
+                continue
+            keep = [k for k in range(n) if k not in (i, j)]
+            pts = [pts[k] for k in keep]
+            pts.insert(i if i < j else 0, hit)
+            merged = True
+            break
+        if not merged:
+            break
+    return np.asarray(pts, np.float64)
 
 
 def _make_opts(px_per_mm, params=None, length_tol_mm=None):
@@ -576,7 +671,8 @@ def assemble(pieces, px_per_mm=None, time_budget=None, node_log=None, params=Non
     if pieces is None or not 2 <= len(pieces) <= 6:
         return None
     try:
-        items = [Piece(i, p) for i, p in enumerate(pieces)]
+        # 先洗干净再进搜索：一条直边中间多一个顶点就会让这条边谁都配不上（见 _clean_polygon）
+        items = [Piece(i, _clean_polygon(p)) for i, p in enumerate(pieces)]
     except ValueError:
         return None
 
@@ -584,6 +680,14 @@ def assemble(pieces, px_per_mm=None, time_budget=None, node_log=None, params=Non
         total = sum(item.area for item in items)
         px_per_mm = float(np.sqrt(total) / 60.0) if total > 0 else 1.0
     opts = _make_opts(px_per_mm, params, length_tol_mm)
+
+    # 每块有几条边，直接决定候选数（外轮廓边 × 剩余块 × 每块边数 × 2）。
+    # 洗过之后还剩很多边，说明这块形状本来就复杂（或者识别出来的角点多）——
+    # 说一声，别让人对着「拼不出来」猜
+    edge_counts = [len(item.verts) for item in items]
+    if node_log is not None and max(edge_counts) > 6:
+        node_log.append(f'  注意：各块边数 {edge_counts}，偏多——候选会多不少，'
+                        f'先看是不是轮廓没洗干净')
 
     ctx = {'nodes': 0,
            'deadline': time.perf_counter() + (time_budget or TIME_BUDGET_S),
