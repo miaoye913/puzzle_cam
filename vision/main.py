@@ -217,8 +217,7 @@ def draw_assembly(result, size=(560, 420)):
         cv2.putText(canvas, f"#{item['id']}", (int(c[0]) - 12, int(c[1]) + 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
-    cv2.putText(canvas, f"{rw:.0f} x {rh:.0f}  fill {assembly['fill']:.3f}  "
-                        f"stretch {assembly['aspect']}",
+    cv2.putText(canvas, f"{rw:.0f} x {rh:.0f}  fill {assembly['fill']:.3f}",
                 (10, size[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
     return canvas
 
@@ -259,10 +258,9 @@ def report(result):
 
     assembly = result.get('assembly')
     if assembly:
-        how = '边匹配（真凑成矩形）' if assembly.get('strict') else '打分搜索兜底（未必是矩形）'
         print(f"  拼接 : 拼成 {assembly['size'][0]:.0f}×{assembly['size'][1]:.0f} 矩形"
-              f"（{how}，外轮廓 {assembly['outer_vertices']} 个顶点，填充率 {assembly['fill']:.4f}，"
-              f"碎块内缩 {assembly['shrink_px']}px，总分 {assembly['score']}）", file=sys.stderr)
+              f"（外轮廓 {assembly['outer_vertices']} 个顶点，填充率 {assembly['fill']:.4f}，"
+              f"总分 {assembly['score']}）", file=sys.stderr)
         for item in assembly['placements']:
             print(f"    #{item['id']} 落在 "
                   f"{[[round(x), round(y)] for x, y in item['polygon']]}", file=sys.stderr)
@@ -393,9 +391,7 @@ def _selftest_assembly():
         np.array([[200, 200], [330, 210], [340, 300], [210, 290]], np.float64),  # 方块
         np.array([[500, 60], [560, 20], [600, 90], [540, 130]], np.float64),     # 菱形
     ]
-    # 这里专测**严格**那条路（fallback=False）：兜底那套一定能交出个东西来，
-    # 拿它去测「拼不成矩形就该说拼不出来」等于没测
-    junk_got = assembly.solve([p.copy() for p in junk], time_budget=10.0, fallback=False)
+    junk_got = assembly.solve([p.copy() for p in junk], time_budget=10.0)
     if junk_got is None:
         print('  拼接 : 拼不成矩形的四块 → 明确报「拼不出来」（对）', file=sys.stderr)
     elif junk_got['fill'] < 0.95:
@@ -622,16 +618,12 @@ def run_selftest():
             src = np.asarray(piece['polygon_warp'], float)
             target = np.asarray(item['polygon'], float)
             if len(src) == len(target) and 'rot_deg' in item:
-                # 要和**内缩之后**的那块比：placement 是内缩后那块刚体变换过去的，
-                # 拿没内缩的原始形状比会差上几个像素，内缩量大时能差十几像素——那是内缩
-                # 造成的，不是角度错。比内缩后的形状，关系是精确的，阈值就能卡得很紧。
-                # _ccw 不能省：_shrink_poly 是按逆时针往内缩的，喂它一个顺时针多边形
-                # 会变成往外扩（solve() 里也是先 _ccw 再 _shrink_poly）
-                shrunk = assembly._shrink_poly(assembly._ccw(src),
-                                               assembly_result.get('shrink_px', 0.0))
+                # 边匹配那套**不内缩**：placement 就是这块原样多边形的刚体变换，
+                # 直接拿原始形状比关系就是精确的，阈值能卡得很紧（以前那套会先把块
+                # 往内缩几像素再摆，所以要先缩一下才能比——那套已经删了）
                 rad = np.radians(item['rot_deg'])
                 rot = np.array([[np.cos(rad), -np.sin(rad)], [np.sin(rad), np.cos(rad)]])
-                moved = (shrunk - shrunk.mean(axis=0)) @ rot.T + target.mean(axis=0)
+                moved = (src - src.mean(axis=0)) @ rot.T + target.mean(axis=0)
                 # 比「到最近目标点」的距离：两边绕向可能相反，逐点按编号比没意义
                 gap = np.linalg.norm(moved[:, None, :] - target[None, :, :], axis=2).min(axis=1)
                 if gap.max() > 2.0:

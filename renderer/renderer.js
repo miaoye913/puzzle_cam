@@ -1247,12 +1247,6 @@ function drawAssembly(result) {
   })
 
   ctx.font = '600 12px "Segoe UI", "Microsoft YaHei", sans-serif'
-  // strict=false 的那个是**打分搜索凑合出来的**，未必真是矩形。
-  // 标出来是有意的：它会被机器照着摆，得让人知道自己在拿一个什么样的结果
-  if (result?.assembly?.strict === false) {
-    ctx.fillStyle = '#ffb454'
-    ctx.fillText('凑合（不是严格矩形）', 4, availH - 18)
-  }
   ctx.fillStyle = '#8b929e'
   ctx.fillText(`拼成 ${rw.toFixed(0)} × ${rh.toFixed(0)}`, 4, availH - 4)
 }
