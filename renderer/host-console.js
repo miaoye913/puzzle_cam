@@ -28,7 +28,6 @@ const hostEl = {
   emBtn: document.getElementById('act-em'),
   pickBtn: document.getElementById('act-pick'),
   placeBtn: document.getElementById('act-place'),
-  calibBtn: document.getElementById('act-calib'),
   send: document.getElementById('host-send'),
   echo: document.getElementById('host-echo'),
   log: document.getElementById('host-log'),
@@ -46,6 +45,7 @@ const hostEl = {
   calCarryDwell: document.getElementById('cal-carrydwell'),
   calSettleDwell: document.getElementById('cal-settledwell'),
   calGap: document.getElementById('cal-gap'),
+  calAnim: document.getElementById('cal-anim'),
   calMoveWait: document.getElementById('cal-movewait'),
   calActionStep: document.getElementById('cal-actionstep'),
   calReadout: document.getElementById('cal-readout'),
@@ -195,7 +195,7 @@ const ACTUATOR_GUARD_MS = 1200
 const SERVO_DOWN = 1
 const SERVO_UP = 0
 
-// 一键校准的两个参数放在设置页里可调（calibration.calibYPulse / calibSettleMs），
+// 校准的两个参数放在设置页里可调（calibration.calibYPulse / calibSettleMs），
 // 因为机器快慢不一样，得能当场调。
 //
 // 那个等待时间**宁可给长一点**：ACK 只代表命令收到、不代表走到了，
@@ -205,26 +205,30 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 let actionRunning = false        // 动作进行中：挡住重复触发
 
 function updateActuatorButtons() {
+  // 一键拼图跑着的时候，除了那个「停止」别的都不该按得动：机器是照着「发完命令等固定
+  // 时间」往下走的，中途插一脚它不知道，只会把整串时序打乱
+  const busy = autoRunning
   hostEl.servoBtn.classList.toggle('active', actuator.servo)
   hostEl.emBtn.classList.toggle('active', actuator.em)
   hostEl.servoBtn.textContent = actuator.servo ? '舵机 开' : '舵机 关'
   hostEl.emBtn.textContent = actuator.em ? '电磁铁 吸合' : '电磁铁 释放'
-  hostEl.servoBtn.disabled = !hostConnected
-  hostEl.emBtn.disabled = !hostConnected
+  hostEl.servoBtn.disabled = !hostConnected || busy
+  hostEl.emBtn.disabled = !hostConnected || busy
   // 没连上就没得动，所以「点击移动」和「旋转」也一起灰掉
-  hostEl.calMove.disabled = !hostConnected
-  hostEl.rotApply.disabled = !hostConnected
-  // 吸/放/一键校准：没连上、或者已经有动作在跑，就按不动
-  for (const button of [hostEl.pickBtn, hostEl.placeBtn, hostEl.calibBtn]) {
-    button.disabled = !hostConnected || actionRunning
+  hostEl.calMove.disabled = !hostConnected || busy
+  hostEl.rotApply.disabled = !hostConnected || busy
+  // 吸/放：没连上、或者已经有动作在跑，就按不动
+  for (const button of [hostEl.pickBtn, hostEl.placeBtn]) {
+    button.disabled = !hostConnected || actionRunning || busy
   }
-  // 自动拼图：跑起来之后**仍然可点**——那时候它是「停止」。
-  // 停在中途之后按钮会写「继续」，因为进度留着，再点一下从断的那块接着拼。
+  // 一键拼图：跑起来之后**仍然可点**——那时候它是「停止」。
+  // 停在中途之后按钮会写「继续」，因为进度留着，再点一下从断的那块接着拼
+  //（那时候**不会**再校准一次：碎片已经被搬动过，重新识别等于把进度扔掉）。
   if (autoRunning) hostEl.autoBtn.textContent = '停止'
-  else if (!autoTotal) hostEl.autoBtn.textContent = '自动拼图'
+  else if (!autoTotal) hostEl.autoBtn.textContent = '一键拼图'
   else if (autoIndex >= autoTotal) hostEl.autoBtn.textContent = `已拼完 ${autoTotal} 块`
   else if (autoIndex > 0) hostEl.autoBtn.textContent = `继续（第 ${autoIndex + 1}/${autoTotal} 块）`
-  else hostEl.autoBtn.textContent = '自动拼图'
+  else hostEl.autoBtn.textContent = '一键拼图'
   hostEl.autoBtn.classList.toggle('stop', autoRunning)
   hostEl.autoBtn.classList.toggle('primary', !autoRunning)
   hostEl.autoBtn.disabled = !hostConnected && !autoRunning
@@ -248,7 +252,7 @@ async function runPickPlace(action) {
       { em: isPick ? 1 : 0, text: isPick ? '电磁铁吸合' : '电磁铁释放' },
       // 放的时候最后一步**顺便把旋转归零**：碎片已经放下、工具是空的，转起来不会蹭到东西。
       // 一条命令带两个字段，不额外占时间（整个动作仍然约 1.45 秒）。
-      // 这一步也是自动拼图能成立的前提——每轮都从「旋转 0」开始，下一块拾取时的姿态才是确定的。
+      // 这一步也是一键拼图能成立的前提——每轮都从「旋转 0」开始，下一块拾取时的姿态才是确定的。
       isPick ? { servo: SERVO_UP, text: '舵机升起' }
              : { servo: SERVO_UP, rot: 0, text: '舵机升起，旋转归零' },
     ]
@@ -284,13 +288,17 @@ async function runPickPlace(action) {
   }
 }
 
-// ── 自动拼图 ────────────────────────────────────────────────────────
-// 对每一块碎片走一遍：旋转归零 → 去取 → 吸 → 转到目标姿态 → 去放 → 放（含旋转归零）
+// ── 一键拼图 ────────────────────────────────────────────────────────
+// 校准（把工具挪出画面 → 识别一次）→ 对每一块碎片走一遍：
+// 旋转归零 → 去取 → 吸 → 转到目标姿态 → 去放 → 放（含旋转归零）
+//
+// 校准并进来当第一步，是因为**校准本来就是拼图的前提**：工具杵在画面里的话，
+// 识别出来的轮廓会多出一只机械爪，拼出来的矩形就不对了。分两个按钮点，反而容易漏掉
+// 校准那一步，所以合成一个。
 
 let autoRunning = false
 let autoAbort = false
-// 现在一次只拼一块，所以要有进度。换了一次识别结果就把进度清零——
-// 碎片已经动过了，旧的路径作废。
+// 进度：拼到第几块了。换了一次识别结果就把进度清零——碎片已经动过了，旧的路径作废。
 let autoIndex = 0
 let autoTotal = 0
 let autoResult = null
@@ -372,6 +380,9 @@ async function assembleOnePiece(path, rect) {
   hostLog(`   旋转 → ${rot}°`)
   await hostCommand({ cmd: 'set', rot })
   hostEl.rotMain.value = String(rot)
+  // 画面上的幻影跟着一起转、一起走。**它不 await**——纯演示，绝不占用机器的时间。
+  // 平移那段的时长就是「移动等待」，所以看上去和机器是同步的。
+  playAssembleAnimation(path)
 
   // 5. 去目标位置，6. 放下（放的过程里会把旋转归零）
   const [tx, ty] = boardToPulses(path.to[0], path.to[1], rect[0], rect[1])
@@ -386,48 +397,69 @@ async function assembleOnePiece(path, rect) {
 async function autoAssemble() {
   if (autoRunning) {          // 再点一下 = 停
     autoAbort = true
-    hostLog('自动拼图：收到停止，走完当前这步就停')
+    hostLog('一键拼图：收到停止，走完当前这步就停')
     return
   }
-  if (!hostConnected) { hostLog('自动拼图：还没连上机器（去设置页连一下）'); return }
-  if (!lastResult?.board?.found) { hostLog('自动拼图：还没有识别结果，先点「识别一次」'); return }
-  if (!lastResult.assembly) { hostLog('自动拼图：这几块没拼出矩形，没得拼'); return }
-
-  const ctx = currentAssemblyMap(lastResult)
-  if (!ctx) { hostLog('自动拼图：拿不到板面尺寸，先识别一次'); return }
-  const rect = lastResult.board.rect_size
-  const paths = planPaths(lastResult, ctx.map, ctx.assembly)
-  if (!paths.length) { hostLog('自动拼图：没有可搬运的路径'); return }
-
-  if (autoIndex >= paths.length) {
-    hostLog(`自动拼图：${paths.length} 块都拼过了。要重来先重新识别一次（进度会跟着重置）`)
-    return
-  }
+  if (!hostConnected) { hostLog('一键拼图：还没连上机器（去设置页连一下）'); return }
 
   // **一口气拼完**，中间不停。想中途收手就点「停止」——停在**步与步之间**，
   // 不会停在半截动作里；进度会留在原地，再点一下从这块接着拼。
   autoRunning = true
   autoAbort = false
   updateActuatorButtons()
-  hostLog(`自动拼图：开始，共 ${paths.length} 块`)
   try {
+    // 第一步：校准 + 识别。**续拼的时候跳过**——碎片已经被搬动过，重新识别会把
+    // 进度扔掉（换了结果路径就作废），而且白等好几秒
+    if (autoIndex > 0) {
+      hostLog(`一键拼图：接着上次，从第 ${autoIndex + 1} 块开始（不重新校准）`)
+    } else {
+      // 先看一眼摄像头有没有画面：没有的话识别必然失败，那就别白折腾机器一趟
+      if (el.video.readyState < 2) {
+        hostLog('一键拼图：摄像头还没出画面，先点「开启摄像头」')
+        return
+      }
+      if (!await calibrateAndRecognize()) return
+      if (autoAbort) return
+    }
+
+    // 识别结果这会儿才拿到，所以「有没有东西可拼」的检查全都挪到这儿
+    if (!lastResult?.board?.found) { hostLog('一键拼图：没识别出板面，摆好再试'); return }
+    if (!lastResult.assembly) { hostLog('一键拼图：这几块没拼出矩形，没得拼'); return }
+
+    const ctx = currentAssemblyMap(lastResult)
+    if (!ctx) { hostLog('一键拼图：拿不到板面尺寸，先识别一次'); return }
+    const rect = lastResult.board.rect_size
+    const paths = planPaths(lastResult, ctx.map, ctx.assembly)
+    if (!paths.length) { hostLog('一键拼图：没有可搬运的路径'); return }
+
+    if (autoIndex >= paths.length) {
+      hostLog(`一键拼图：${paths.length} 块都拼过了。要重来先重新识别一次（进度会跟着重置）`)
+      return
+    }
+    // 动画画在叠加层上，叠加层关着就什么都看不到——这个坑不说明一下很难自己想到
+    if (assemblyAnimEnabled() && el.overlay.classList.contains('hidden')) {
+      hostLog('提示：拼图动画开着，但「显示叠加层」是关的，画面上看不到（设置页里打开）')
+    }
+
+    hostLog(`一键拼图：开始搬，共 ${paths.length} 块`)
     while (autoIndex < paths.length && !autoAbort) {
       const path = paths[autoIndex]
       const step = autoIndex + 1
       hostLog(`—— 第 ${step}/${paths.length} 块（#${path.id}）——`)
       if (!await assembleOnePiece(path, rect)) {
-        hostLog(`自动拼图：已停止（第 ${step} 块没走完，下次还是从这一块开始）`)
+        hostLog(`一键拼图：已停止（第 ${step} 块没走完，下次还是从这一块开始）`)
         break
       }
       autoIndex = step            // 只有整块走完才往前走
-      hostLog(`自动拼图：第 ${step}/${paths.length} 块完成`)
+      hostLog(`一键拼图：第 ${step}/${paths.length} 块完成`)
     }
     if (!autoAbort && autoIndex >= paths.length) {
-      hostLog(`自动拼图：${paths.length} 块全部拼完`)
+      hostLog(`一键拼图：${paths.length} 块全部拼完`)
     }
   } finally {
     autoRunning = false
     autoAbort = false
+    clearAssemblyAnimation()      // 收工就把幻影擦掉：它是「正在搬」，搬完了就不该还挂着
     updateActuatorButtons()
   }
 }
@@ -436,7 +468,7 @@ async function autoAssemble() {
  * 把每块碎片的「未拼」（现在在哪）和「已拼」（拼好该在哪）填进设置页那张表。
  *
  * 毫米和脉冲都给：毫米是画面上的位置，脉冲是发给机器的值。
- * 自动拼图出问题时，先看这两列——**目标脉冲对不对**一眼就能判断是换算错了还是机器没走到。
+ * 一键拼图出问题时，先看这两列——**目标脉冲对不对**一眼就能判断是换算错了还是机器没走到。
  */
 function updatePathTable(result) {
   const body = document.getElementById('path-table')
@@ -459,7 +491,7 @@ function updatePathTable(result) {
   const paths = planPaths(result, ctx.map, ctx.assembly)
   if (!paths.length) { autoTotal = 0; reset('没拼出矩形'); return }
 
-  // 换了一份识别结果就把自动拼图的进度清零：碎片已经被搬过，旧路径作废了
+  // 换了一份识别结果就把一键拼图的进度清零：碎片已经被搬过，旧路径作废了
   if (result !== autoResult) {
     autoResult = result
     autoIndex = 0
@@ -488,42 +520,32 @@ function updatePathTable(result) {
 }
 
 /**
- * 一键校准：Y 开到标定位置（挪出画面）→ 等它走完 → 识别一次 → 再移到板子中央。
+ * 校准：Y 开到标定位置（把工具挪出画面）→ 等它走完 → 识别一次。返回成功没有。
  *
- * 最后那步移到中央是为了方便接着动手——校准完工具停在画面外，什么也够不着。
+ * **挪工具这一步就是为了识别**：机械爪杵在画面里的话，识别出来的轮廓里会多出一只手，
+ * 拼出来的矩形自然也对不上。
+ *
+ * 它现在是一键拼图的第一步，不再单独占一个按钮。原来校准完还会「移到板子中央」
+ *（那会儿是给人接着手动操作的），现在用不上了——下一步就是去取件位置，
+ * 挪回中央纯属绕路，所以那一步去掉。
+ *
+ * 等待用 sleepAbortable：校准那几秒里点「停止」应当立刻停，而不是傻等完再停。
  */
-async function oneClickCalibrate() {
-  if (actionRunning || !hostConnected) return
-  actionRunning = true
-  updateActuatorButtons()
+async function calibrateAndRecognize() {
   const yTarget = Math.round(Number(calibration.calibYPulse) || 0)
   const waitMs = Math.max(0, Math.round(Number(calibration.calibSettleMs) || 0))
-  try {
-    hostLog(`一键校准：Y → 脉冲 ${yTarget}，等 ${waitMs}ms`)
-    const reply = await hostCommand({ cmd: 'set', y: yTarget })
-    if (!reply?.ok) {
-      hostLog('一键校准中断：Y 没发出去')
-      return
-    }
-    // 等机器真的走过去。宁可多等——半路上抓帧的话识别到的是糊的，白做
-    await sleep(waitMs)
-    hostLog('一键校准：开始识别')
-    await recognizeOnce()
-
-    // 停到板子中央，方便下一步动手
-    const rect = lastResult?.board?.rect_size
-    if (rect) {
-      const [cx, cy] = boardToPulses(rect[0] / 2, rect[1] / 2, rect[0], rect[1])
-      const centre = [Math.round(cx), Math.round(cy)]
-      hostLog(`一键校准：移到中央 脉冲(${centre[0]}, ${centre[1]})`)
-      await hostCommand({ cmd: 'set', x: centre[0], y: centre[1] })
-    } else {
-      hostLog('一键校准：没识别出板面，跳过「移到中央」')
-    }
-  } finally {
-    actionRunning = false
-    updateActuatorButtons()
+  hostLog(`校准：Y → 脉冲 ${yTarget}，等 ${waitMs}ms`)
+  const reply = await hostCommand({ cmd: 'set', y: yTarget })
+  if (!reply?.ok) {
+    hostLog('校准中断：Y 没发出去')
+    return false
   }
+  // 等机器真的走过去。宁可多等——半路上抓帧的话识别到的是糊的，白做
+  await sleepAbortable(waitMs)
+  if (autoAbort) return false
+  hostLog('校准：开始识别')
+  await recognizeOnce()
+  return true
 }
 
 async function toggleActuator(which) {
@@ -548,7 +570,8 @@ const CAL_DEFAULTS = {
   xMin: 500, xMax: 2200, yMin: 2200, yMax: 25100,
   invertX: false, invertY: false, boardW: 297, boardH: 210,
   calibYPulse: 32000, calibSettleMs: 4000,
-  autoMoveMs: 4000, autoCarryDwellMs: 1000, autoSettleMs: 800, actionStepMs: 700, assemblyGapMm: 2,
+  autoMoveMs: 4000, autoCarryDwellMs: 1000, autoSettleMs: 800, actionStepMs: 700,
+  assemblyGapMm: 2, assemblyAnim: true,
 }
 
 function fillCalibrationForm() {
@@ -565,6 +588,7 @@ function fillCalibrationForm() {
   hostEl.calCarryDwell.value = calibration.autoCarryDwellMs
   hostEl.calSettleDwell.value = calibration.autoSettleMs
   hostEl.calGap.value = calibration.assemblyGapMm
+  hostEl.calAnim.checked = calibration.assemblyAnim
   hostEl.calMoveWait.value = calibration.autoMoveMs
   hostEl.calActionStep.value = calibration.actionStepMs
 }
@@ -587,6 +611,7 @@ function applyCalibrationForm() {
   calibration.autoCarryDwellMs = num(hostEl.calCarryDwell, calibration.autoCarryDwellMs)
   calibration.autoSettleMs = num(hostEl.calSettleDwell, calibration.autoSettleMs)
   calibration.assemblyGapMm = num(hostEl.calGap, calibration.assemblyGapMm)
+  calibration.assemblyAnim = hostEl.calAnim.checked
   calibration.autoMoveMs = num(hostEl.calMoveWait, calibration.autoMoveMs)
   calibration.actionStepMs = num(hostEl.calActionStep, calibration.actionStepMs)
   saveCalibration()
@@ -708,6 +733,11 @@ function wireHostConsole() {
   }
   hostEl.calInvX.addEventListener('change', applyCalibrationForm)
   hostEl.calInvY.addEventListener('change', applyCalibrationForm)
+  // 关掉动画就当场把画面上的幻影擦掉，不用等下一次识别
+  hostEl.calAnim.addEventListener('change', () => {
+    applyCalibrationForm()
+    if (!assemblyAnimEnabled()) clearAssemblyAnimation()
+  })
   hostEl.calReset.addEventListener('click', () => {
     Object.assign(calibration, CAL_DEFAULTS)
     fillCalibrationForm()
@@ -728,7 +758,6 @@ function wireHostConsole() {
 
   hostEl.pickBtn.addEventListener('click', () => runPickPlace('pick'))
   hostEl.placeBtn.addEventListener('click', () => runPickPlace('place'))
-  hostEl.calibBtn.addEventListener('click', oneClickCalibrate)
   hostEl.autoBtn.addEventListener('click', autoAssemble)
 
   el.board.addEventListener('click', onBoardClick)

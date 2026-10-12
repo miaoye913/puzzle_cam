@@ -48,10 +48,10 @@
               title="吸：舵机放下 → 电磁铁吸合 → 舵机升起">吸</button>
       <button id="act-place" class="toggle" disabled
               title="放：舵机放下 → 电磁铁释放 → 舵机升起">放</button>
-      <button id="act-calib" disabled
-              title="把 Y 轴开到标定位置，停顿一下再识别一次">一键校准</button>
+      <!-- 校准和拼图合成一个按钮：校准本来就是拼图的第一步（把工具挪出画面才好识别），
+           分开点反而容易漏掉一步 —— 没校准就拼，识别到的轮廓里会多出机械爪 -->
       <button id="act-auto" class="primary" disabled
-              title="按拼好的结果，把每块碎片依次搬到它的位置；再点一下停止">自动拼图</button>
+              title="点一下：先把工具挪出画面并识别一次，再按拼好的结果把每块碎片依次搬到位；再点一下停止">一键拼图</button>
 
       <label class="host-num">旋转° <input id="rot-main" class="cal-num" value="0" /></label>
       <button id="rot-apply" disabled title="把机器转到这个角度">旋转</button>
@@ -144,12 +144,20 @@
               </label>
               <span class="muted">拼好的块之间留的缝，0 = 严丝合缝</span>
             </div>
+            <!-- 只是给人看的演示，不参与任何坐标计算。平移那段的时长就是下面的「移动等待」 -->
+            <div class="host-row">
+              <label class="field checkbox">
+                <input type="checkbox" id="cal-anim" />
+                拼图动画
+              </label>
+              <span class="muted">搬的时候在画面上跟着转、跟着走（只是演示，不影响机器）</span>
+            </div>
             <div class="host-row">
               <label class="field checkbox"><input type="checkbox" id="cal-invx" /> X 反向</label>
               <label class="field checkbox"><input type="checkbox" id="cal-invy" /> Y 反向</label>
               <button id="cal-reset" class="ghost">复位</button>
             </div>
-            <!-- 一键校准那两个参数。等待时间要给够——机器还没走到就抓帧的话，
+            <!-- 校准（一键拼图的第一步）那两个参数。等待时间要给够——机器还没走到就抓帧的话，
                  识别到的是半路上的画面，标定就白做了 -->
             <div class="host-row">
               <label class="host-num">校准位移 Y <input id="cal-caliby" class="cal-num" /></label>
@@ -176,7 +184,7 @@
               </label>
               <span class="muted">吸起后、开始搬之前</span>
             </div>
-            <!-- 吸/放 里面三步之间的间隔。手动按和自动拼图里的取放都走它 -->
+            <!-- 吸/放 里面三步之间的间隔。手动按和一键拼图里的取放都走它 -->
             <div class="host-row">
               <label class="host-num">吸/放步进
                 <input id="cal-actionstep" class="cal-num" /> ms

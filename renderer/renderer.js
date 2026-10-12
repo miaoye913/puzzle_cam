@@ -316,8 +316,14 @@ function boardLayout(boardW, boardH) {
 /** 把 canvas 摆到指定位置尺寸并清空，返回已经按 DPR 设好变换的 2D 上下文 */
 function placeCanvas(canvas, w, h, left, top) {
   const dpr = window.devicePixelRatio || 1
-  canvas.width = Math.round(w * dpr)
-  canvas.height = Math.round(h * dpr)
+  // 尺寸没变就别再赋一次 width/height：给 canvas.width 赋同一个值也会**重置整个画布**
+  //（重新分配缓冲区 + 清空 + 变换归零），拼图动画一帧重画一次，白白重分配 60 次/秒
+  const wantW = Math.round(w * dpr)
+  const wantH = Math.round(h * dpr)
+  if (canvas.width !== wantW || canvas.height !== wantH) {
+    canvas.width = wantW
+    canvas.height = wantH
+  }
   canvas.style.width = `${w}px`
   canvas.style.height = `${h}px`
   canvas.style.left = `${left}px`
@@ -330,6 +336,8 @@ function placeCanvas(canvas, w, h, left, top) {
 
 let boardImage = null
 let boardImageData = null
+/** 上一次画板面算出来的位置和缩放。动画帧只重画叠加层，靠它，不用每帧再量一次 DOM */
+let lastBoardLayout = null
 
 /** 主画面：矫正后的板面。没有板面就返回 null，调用方据此跳过叠加层 */
 function drawBoard(result) {
@@ -357,6 +365,7 @@ function setBoardImage(encoded) {
 
 function renderView() {
   const layout = drawBoard(lastResult)
+  lastBoardLayout = layout
   drawOverlay(lastResult, layout)
   drawAssembly(lastResult)
   // 设置页那张搬运坐标表也跟着刷（它定义在 host-console.js 里，页面加载完才在）
@@ -515,6 +524,9 @@ function planPaths(result, assemblyMap, assembly = currentAssembly(result)) {
       dy: to[1] - from[1],
       dist: Math.hypot(to[0] - from[0], to[1] - from[1]),
       dRot,
+      // 起点的轮廓和终点的轮廓都留着：一个是碎片**现在**长什么样，一个是它**该**落成什么样。
+      // 画虚线的目标框用后者，拼图动画的幻影用前者（转完、挪过去正好和后者的位置重合）。
+      sourcePolygon: piece.polygon_warp,
       targetPolygon: targetBoard,
     })
   }
@@ -646,7 +658,7 @@ function drawMachineMarker(ctx, rectW, rectH, layout) {
 /**
  * 当前这份结果对应的「拼装映射」。
  *
- * drawOverlay 画虚线目标框用它，自动拼图算「机器该去哪儿」也用它——
+ * drawOverlay 画虚线目标框用它，一键拼图算「机器该去哪儿」也用它——
  * **必须是同一个**：各算各的，迟早会分家，那才叫难查。
  */
 function currentAssemblyMap(result) {
@@ -658,6 +670,169 @@ function currentAssemblyMap(result) {
   const map = makeAssemblyMap(assembly, layout, dividerX, layout.h)
   if (!map) return null
   return { layout, map, assembly }
+}
+
+// ── 拼图动画：机器在搬的时候，画面上跟着动 ────────────────────────────
+//
+// **纯演示**：它只画在叠加层上，不参与任何坐标计算——机器去哪儿仍然由 planPaths 决定，
+// 关掉它（设置页「拼图动画」）机器一点不受影响。
+//
+// 走的是和机器一样的先后顺序：先在取件位置**转到目标姿态**，再**平移到目标位置**。
+// 平移那段的时长直接用「移动等待」——那个值本来就是「机器走完这段要多久」，
+// 动画跟着它走，看上去就和机器同步了，不用再多一个旋钮。
+//
+// 幻影用的是**板面坐标**，和虚线目标框同一套，所以它最后会正好落进自己的虚线框里：
+// 一眼就能看出这块会以什么姿态落到哪儿。
+
+/** 动画和它的演示对象（当前正在搬的那块） */
+let animGhost = null    // { id, base, from, to, rot, centroid }
+let animRaf = 0
+
+/** 设置页那个勾。关掉就什么都不画 */
+function assemblyAnimEnabled() {
+  return !!calibration.assemblyAnim
+}
+
+/**
+ * 幻影此刻的轮廓：把碎片**原始**轮廓（板面坐标）绕自己的重心转 rot 度，
+ * 再整体平移到它现在所在的位置。
+ *
+ * 用「原始轮廓 + 变换」而不是每帧去算一份新多边形，是为了保证幻影**每一帧都是刚性的**——
+ * 形状一点不变，只有位置和角度在动，跟机器夹着一块硬东西走是一回事。
+ */
+function ghostVertices(ghost) {
+  const rad = (ghost.rot * Math.PI) / 180
+  const cos = Math.cos(rad)
+  const sin = Math.sin(rad)
+  const dx = ghost.centroid[0] - ghost.from[0]
+  const dy = ghost.centroid[1] - ghost.from[1]
+  return ghost.base.map(([x, y]) => {
+    const px = x - ghost.from[0]
+    const py = y - ghost.from[1]
+    return [
+      ghost.from[0] + px * cos - py * sin + dx,
+      ghost.from[1] + px * sin + py * cos + dy,
+    ]
+  })
+}
+
+/** 两头慢中间快：看着像机器起步和收尾，不是匀速直线瞬移过去 */
+function easeInOut(u) {
+  const x = Math.min(1, Math.max(0, u))
+  return x * x * (3 - 2 * x)
+}
+
+/** 转那一段的时长：按角度给，转得多就多花点时间，但两头都夹住，免得快到看不清或慢得离谱 */
+function animRotMs(dRot) {
+  return Math.max(350, Math.min(1500, Math.abs(Number(dRot) || 0) * 12))
+}
+
+/**
+ * 动画帧只重画叠加层。板面图和设置页那张坐标表都不动——
+ * 每帧连它们一起重建纯属白烧 CPU（那张表还要重建 DOM）。
+ */
+function redrawOverlay() {
+  if (!lastBoardLayout) return
+  drawOverlay(lastResult, lastBoardLayout)
+}
+
+/**
+ * 第 elapsed 毫秒时幻影该在哪儿、转到多少度：**先原地转到目标姿态，再保持这个姿态平移过去**。
+ *
+ * 抽成纯函数有个实在的好处：能脱离 rAF 单独验。隐藏窗口（测试就是）里浏览器
+ * **不产生 vsync，rAF 基本不回调**，靠「等它跑几帧」来测根本测不稳；直接拿时间轴
+ * 扫一遍，就能断言「第 0 毫秒在原位、中途单调、最后正好落在目标上」。
+ */
+function ghostStateAt(path, elapsed, rotMs, moveMs) {
+  if (elapsed < rotMs) {
+    return { rot: path.dRot * easeInOut(elapsed / rotMs), centroid: path.from.slice() }
+  }
+  const u = easeInOut(moveMs ? (elapsed - rotMs) / moveMs : 1)
+  return {
+    rot: path.dRot,
+    centroid: [
+      path.from[0] + (path.to[0] - path.from[0]) * u,
+      path.from[1] + (path.to[1] - path.from[1]) * u,
+    ],
+  }
+}
+
+/**
+ * 开始演示一块碎片的搬运：转 → 走。
+ *
+ * **故意不 await**：它是给人看的，绝不能拖慢机器——调用方发完命令就走，
+ * 动画自己在 rAF 里按时间跑。下一块开始时会把上一块顶掉。
+ */
+function playAssembleAnimation(path) {
+  if (!assemblyAnimEnabled()) return
+  const base = path?.sourcePolygon
+  if (!base?.length || !path.from || !path.to) return
+  if (animRaf) cancelAnimationFrame(animRaf)
+
+  const rotMs = animRotMs(path.dRot)
+  const moveMs = Math.max(0, Math.round(Number(calibration.autoMoveMs) || 0))
+  const t0 = performance.now()
+  animGhost = {
+    id: path.id,
+    base,
+    from: path.from.slice(),
+    to: path.to.slice(),
+    rot: 0,
+    centroid: path.from.slice(),
+  }
+
+  const frame = () => {
+    const t = performance.now() - t0
+    const state = ghostStateAt(path, t, rotMs, moveMs)
+    animGhost.rot = state.rot
+    animGhost.centroid = state.centroid
+    redrawOverlay()
+    // 走完就停在目标上——那正是这块拼好之后的样子，留着给人对照
+    animRaf = t < rotMs + moveMs ? requestAnimationFrame(frame) : 0
+  }
+  animRaf = requestAnimationFrame(frame)
+}
+
+/** 收工：停掉动画、擦掉幻影。停下、拼完、或者关掉那个勾，都走这儿 */
+function clearAssemblyAnimation() {
+  if (animRaf) {
+    cancelAnimationFrame(animRaf)
+    animRaf = 0
+  }
+  if (!animGhost) return
+  animGhost = null
+  redrawOverlay()
+}
+
+/**
+ * 把幻影画出来。画在路径**之后**（盖住虚线目标框）、机器准星**之前**——
+ * 准星是「机器此刻真正在哪」，任何时候都得在最上面。
+ */
+function drawAssemblyGhost(ctx, scale) {
+  if (!animGhost) return
+  const poly = ghostVertices(animGhost).map(([x, y]) => [x * scale, y * scale])
+  ctx.save()
+  ctx.beginPath()
+  poly.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)))
+  ctx.closePath()
+  ctx.fillStyle = 'rgba(255, 209, 102, 0.28)'
+  ctx.fill()
+  ctx.strokeStyle = PATH_COLOR
+  ctx.lineWidth = 2.5
+  ctx.lineJoin = 'round'
+  ctx.stroke()
+
+  const [cx, cy] = animGhost.centroid
+  const label = `#${animGhost.id} 搬运中`
+  ctx.font = '600 13px "Segoe UI", "Microsoft YaHei", sans-serif'
+  ctx.textAlign = 'center'
+  ctx.lineWidth = 3
+  ctx.strokeStyle = 'rgba(0,0,0,0.75)'
+  ctx.strokeText(label, cx * scale, cy * scale + 4)
+  ctx.fillStyle = PATH_COLOR
+  ctx.fillText(label, cx * scale, cy * scale + 4)
+  ctx.textAlign = 'start'
+  ctx.restore()
 }
 
 function drawOverlay(result, layout) {
@@ -893,6 +1068,9 @@ function drawOverlay(result, layout) {
     ctx.fillText(text, mx, my)
   }
 
+  // 拼图动画的幻影：机器正搬着的那块。在准星下面，免得盖住「机器现在到底在哪」
+  drawAssemblyGhost(ctx, layout.scale)
+
   // 机器位置和目标点画在最上层：它们是「此刻在哪 / 要去哪」，被别的东西盖住就没意义了
   drawMachineMarker(ctx, boardW, boardH, layout)
   drawClickTarget(ctx, boardW, boardH, layout)
@@ -962,6 +1140,7 @@ async function recognizeOnce() {
       return
     }
     lastResult = reply.result
+    clearAssemblyAnimation()          // 换了识别结果，上一轮留下的幻影作废
     el.visionStats.textContent = visionStatsText(reply.result)
     // 板面图是 base64，解码要等一下；解好了 setBoardImage 自己会再调一次 renderView
     setBoardImage(reply.result.board_image_b64)
@@ -988,6 +1167,8 @@ function stopVision() {
   lastResult = null
   boardImage = null
   boardImageData = null
+  lastBoardLayout = null
+  clearAssemblyAnimation()
   el.visionStats.textContent = ''
   window.camAPI.vision.stop()
   el.board.getContext('2d').clearRect(0, 0, el.board.width, el.board.height)
