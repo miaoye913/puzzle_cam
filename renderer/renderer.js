@@ -1203,8 +1203,11 @@ function drawAssembly(result) {
 
   const assembly = currentAssembly(result)
   if (!assembly || !assembly.placements?.length) {
+    // 「没拼出矩形」这四个字对排查毫无用处，所以把侧车最后那句原因一起显示出来：
+    // 是块数不对？一条边都没配上？还是搜超时了？——一眼能分出来
+    const why = (result?.assembly_log ?? []).slice(-1)[0]?.trim()
     el.assemblyHint.textContent = result?.board?.found
-      ? '这几块没拼出矩形'
+      ? (why || '这几块没拼出矩形')
       : '没找到拼板，无法拼接'
     el.assemblyHint.classList.remove('hidden')
     return
@@ -1244,6 +1247,12 @@ function drawAssembly(result) {
   })
 
   ctx.font = '600 12px "Segoe UI", "Microsoft YaHei", sans-serif'
+  // strict=false 的那个是**打分搜索凑合出来的**，未必真是矩形。
+  // 标出来是有意的：它会被机器照着摆，得让人知道自己在拿一个什么样的结果
+  if (result?.assembly?.strict === false) {
+    ctx.fillStyle = '#ffb454'
+    ctx.fillText('凑合（不是严格矩形）', 4, availH - 18)
+  }
   ctx.fillStyle = '#8b929e'
   ctx.fillText(`拼成 ${rw.toFixed(0)} × ${rh.toFixed(0)}`, 4, availH - 4)
 }

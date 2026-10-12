@@ -393,7 +393,9 @@ def _selftest_assembly():
         np.array([[200, 200], [330, 210], [340, 300], [210, 290]], np.float64),  # 方块
         np.array([[500, 60], [560, 20], [600, 90], [540, 130]], np.float64),     # 菱形
     ]
-    junk_got = assembly.solve([p.copy() for p in junk], time_budget=10.0)
+    # 这里专测**严格**那条路（fallback=False）：兜底那套一定能交出个东西来，
+    # 拿它去测「拼不成矩形就该说拼不出来」等于没测
+    junk_got = assembly.solve([p.copy() for p in junk], time_budget=10.0, fallback=False)
     if junk_got is None:
         print('  拼接 : 拼不成矩形的四块 → 明确报「拼不出来」（对）', file=sys.stderr)
     elif junk_got['fill'] < 0.95:

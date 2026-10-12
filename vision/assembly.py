@@ -375,6 +375,10 @@ def _solve_by_edges(polys, board_w_px, budget, node_log):
     """
     px_per_mm = (board_w_px / assembly_edge.BOARD_W_MM) if board_w_px else None
     overall = time.perf_counter() + budget
+    if not 2 <= len(polys) <= 6:
+        if node_log is not None:
+            node_log.append(f'  边匹配：{len(polys)} 块不在 2~6 之间，这一套不适用')
+        return None
     got = None
     for tol_mm in EDGE_TOL_LADDER_MM:
         if time.perf_counter() > overall:
@@ -390,9 +394,14 @@ def _solve_by_edges(polys, board_w_px, budget, node_log):
         )
         if got is not None:
             if node_log is not None:
-                node_log.append(f'  边匹配：边长容差 {tol_mm:.1f}mm 这档成了')
+                rung_note = '（这一轮被时间砍过，结果可能不是它搜得动的最好的）' if got.get('aborted') else ''
+                node_log.append(f'  边匹配：边长容差 {tol_mm:.1f}mm 这档成了{rung_note}')
             break
     if got is None:
+        if node_log is not None:
+            rungs = '/'.join(f'{t:.0f}' for t in EDGE_TOL_LADDER_MM)
+            node_log.append(f'  边匹配：边长容差 {rungs}mm 三档都没凑成矩形'
+                            f'（碎片可能是量得太不准，或者这几块本来就不拼这个矩形）')
         return None
 
     ids = [pid for pid, _v, _r in got['placed']]
@@ -422,18 +431,26 @@ def _solve_by_edges(polys, board_w_px, budget, node_log):
 
 
 def solve(pieces, aspect=None, shrink=None, beam_width=None, time_budget=None, node_log=None,
-          board_w_px=None, fallback=False):
+          board_w_px=None, fallback=True):
     """
-    把碎片拼成矩形。**拼不出来就返回 None**，不拿「看着像」的东西凑数。
+    把碎片拼成矩形。拼不出来返回 None。
 
-    主路径是 `assembly_edge`（边匹配 + 回溯）：它只认**真的凑成矩形**的摆法。
-    凑不出来就报没有——实测反馈的「拼出来的矩形不对」，根子就在下面那套打分搜索上：
-    打分函数里「离矩形有多近」只是一项扣分，摆错的方案照样能排到前面，于是它总能
-    交出一个东西来，而那个东西未必是矩形。
+    **两条路，先严后松**：
 
-    `fallback=True` 才会在边匹配失败时退回那套束搜索 + 打分兜底，结果里标
-    `strict = False`。默认关：**宁可说拼不出来，也不给一个错的**——错的那个会被
-    画到屏幕上、还会被机器照着摆，比「没有结果」有害得多。
+      1. `assembly_edge`（边匹配 + 回溯）先上。它只认**真的凑成矩形**的摆法，
+         结果里带 `strict = True`；
+      2. 它没成，才退回下面那套束搜索 + 打分（`fallback=True`，默认开），
+         结果里带 `strict = False`。
+
+    第 2 条是**兜底、不是等价选择**：打分函数里「离矩形有多近」只是一项扣分，
+    摆错的方案照样能排到前面，所以它交出来的东西未必是矩形——上层必须看 `strict`，
+    别把 `False` 的那个当成拼对了。
+
+    为什么默认留着这条兜底：一开始是关的（宁可说拼不出来也不给错的），
+    但实测反馈"现在根本不拼了"——严的那条一旦判不出来，界面上就什么都没有，
+    连"为什么判不出来"都看不到。现在的取舍是：**兜底留着，但明说这是凑合的**，
+    外加把判不出来的原因原样显示出来（见 `pipeline.analyze` 的 `assembly_log`）。
+    要"只要严格结果"就显式传 `fallback=False`。
 
     pieces: [Nx2 的 ndarray, ...]，每块的多边形，同一坐标系（板面像素）。
     board_w_px: 板面在矫正图里有多宽（像素）。边匹配的容差是毫米级的物理量，

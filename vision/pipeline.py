@@ -728,6 +728,7 @@ def analyze(frame, preview=False):
             # 没找到板面也就谈不上判型，给个默认值，前端不用分情况
             'piece_mode': 'solid',
             'piece_mode_detail': None,
+            'assembly_log': [],
             'timing_ms': round((time.perf_counter() - started) * 1000, 2),
         }
 
@@ -741,11 +742,15 @@ def analyze(frame, preview=False):
     # 拼接要用**矫正空间**的多边形（那才是碎片的真实形状），所以赶在坐标映射回原图之前算。
     # 传进去的顺序就是 pieces 的顺序，solve() 会把每块原来排第几个一并带回来。
     assembled = None
+    # 拼接过程的日志留着：**拼不出来的时候要能说出为什么**。
+    # 「没拼出矩形」这四个字对排查一点用没有——是块数不对？一条边都没配上？还是搜超时了？
+    assembly_log = []
     if ASSEMBLY_ENABLE and 2 <= len(pieces) <= ASSEMBLY_MAX_PIECES:
         # board_w_px 是给「边匹配」那套折算容差用的：容差是毫米级的物理量，
         # 而板子是 A4（297mm），有了板宽就知道这里 1 毫米是多少像素
         assembled = assembly.solve([np.array(p['polygon'], np.float64) for p in pieces],
-                                   time_budget=ASSEMBLY_TIME_BUDGET, board_w_px=rw)
+                                   time_budget=ASSEMBLY_TIME_BUDGET, board_w_px=rw,
+                                   node_log=assembly_log)
         if assembled is not None:
             for item in assembled['placements']:
                 item['id'] = pieces[item['index']]['id']
@@ -791,6 +796,8 @@ def analyze(frame, preview=False):
         # 摆在结果里是**故意的**：判错了得让人一眼看见，不然就是个黑盒
         'piece_mode': piece_mode,
         'piece_mode_detail': piece_mode_detail,
+        # 拼不出来时，这几行就是原因（前端「拼好的矩形」那个小窗直接显示最后一行）
+        'assembly_log': assembly_log[-6:],
         'timing_ms': round((time.perf_counter() - started) * 1000, 2),
     }
 

@@ -691,7 +691,7 @@ def assemble(pieces, px_per_mm=None, time_budget=None, node_log=None, params=Non
 
     ctx = {'nodes': 0,
            'deadline': time.perf_counter() + (time_budget or TIME_BUDGET_S),
-           'opts': opts, 'failed': set()}
+           'opts': opts, 'failed': set(), 'aborted': False}
 
     def note(text):
         if node_log is not None:
@@ -713,8 +713,11 @@ def assemble(pieces, px_per_mm=None, time_budget=None, node_log=None, params=Non
                 'fill': float(fill),
                 'size': size,
                 'nodes': ctx['nodes'],
+                'aborted': bool(ctx['aborted']),
             }
-        note(f'边匹配：以 #{seed.id} 为底没搜出矩形')
+        note(f'边匹配：以 #{seed.id} 为底' + ('搜到一半被时间砍了' if ctx['aborted']
+                                             else '搜遍了也没凑出矩形'))
+        ctx['aborted'] = False
     note(f'边匹配：怎么试都凑不成矩形（搜了 {ctx["nodes"]} 个节点）')
     return None
 
@@ -732,6 +735,7 @@ def _search(state, left, ctx):
 
     ctx['nodes'] += 1
     if ctx['nodes'] > MAX_NODES or time.perf_counter() > ctx['deadline']:
+        ctx['aborted'] = True      # 是「搜到一半被砍了」，不是「搜遍了没有」——得分清楚
         ctx['failed'].add(key)
         return None
 
