@@ -144,6 +144,18 @@
               </label>
               <span class="muted">拼好的块之间留的缝，0 = 严丝合缝</span>
             </div>
+            <!-- 待机：点完之后先不开机器，等操作的人拿红卡纸挡一下画面再挪开
+                 （挡 = 还没准备好，挪开 = 可以开始）。机器一动没动之前先让人准备好 -->
+            <div class="host-row">
+              <label class="field checkbox">
+                <input type="checkbox" id="cal-cardgate" />
+                红卡纸待机
+              </label>
+              <label class="host-num">红色占
+                <input id="cal-cardpct" class="cal-num" /> %
+              </label>
+              <span class="muted">点一下先待机，红卡纸挡一下再挪开才动机器</span>
+            </div>
             <!-- 只是给人看的演示，不参与任何坐标计算。平移那段的时长就是下面的「移动等待」 -->
             <div class="host-row">
               <label class="field checkbox">

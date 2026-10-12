@@ -47,6 +47,8 @@ const hostEl = {
   calSettleDwell: document.getElementById('cal-settledwell'),
   calGap: document.getElementById('cal-gap'),
   calAnim: document.getElementById('cal-anim'),
+  calCardGate: document.getElementById('cal-cardgate'),
+  calCardPct: document.getElementById('cal-cardpct'),
   calMoveWait: document.getElementById('cal-movewait'),
   calActionStep: document.getElementById('cal-actionstep'),
   calReadout: document.getElementById('cal-readout'),
@@ -319,6 +321,80 @@ async function sleepAbortable(ms) {
   }
 }
 
+// ── 红卡纸待机：点了「一键拼图」先不开机器，等操作的人挥一下红卡纸 ──────
+//
+// 做法就是操作的人和机器之间的一个手势：**拿红卡纸挡一下画面 = 「我还没弄好」**，
+// **挪开 = 「可以开始了」**。所以是两段：先等红色出现（确认他真要开始），
+// 再等红色消失（他把卡纸挪开了），然后才动机器。
+//
+// 这一眼在**渲染进程**里做，不走侧车：侧车一个来回要跑整套识别（几十毫秒到几秒），
+// 而这里只要「红色占多大比例」，缩到 160×90 数一遍像素、几毫秒的事。
+// 也不用管画面方向（`CAMERA_ROTATE_180`）——红卡纸转 180° 还是红的。
+let CARD_POLL_MS = 150              // 多久看一眼
+let CARD_WAIT_MS = 30000            // 等它出现的上限：没挥卡纸就直接开始，别卡在这儿
+let CARD_HOLD_MS = 10 * 60 * 1000   // 等它挪开的上限：真一直挡着就走人，不硬开机器
+let redSampleCanvas = null
+
+/** 画面里红色占多大比例（0~1）。取不到画面就返回 null。source 只是给自测塞张假图用 */
+function sampleRedRatio(source = el.video) {
+  if (!source?.videoWidth && !source?.width) return null
+  const canvas = redSampleCanvas ?? (redSampleCanvas = document.createElement('canvas'))
+  canvas.width = 160
+  canvas.height = 90
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  ctx.drawImage(source, 0, 0, canvas.width, canvas.height)
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+  let red = 0
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i]
+    // 「红」= 红通道明显压过另外两个。板面的绿、碎片的白/黑都过不了这一关，
+    // 板上那条红记号线太细（实测 7px 宽），占比远够不到门槛
+    if (r > 90 && r > 1.6 * data[i + 1] && r > 1.6 * data[i + 2]) red += 1
+  }
+  return red / (canvas.width * canvas.height)
+}
+
+/**
+ * 等红卡纸：先等它出现，再等它挪开。返回 false 表示被「停止」打断或者一直挡着没挪开。
+ */
+async function redCardGate() {
+  const need = Math.max(1, Math.min(99, Number(calibration.cardCoverPct) || 20)) / 100
+  const pct = (v) => `${(v * 100).toFixed(0)}%`
+  hostLog(`一键拼图：先待机——拿红卡纸挡一下画面，再挪开我就开始（红色占到 ${pct(need)} 就算挡住）`)
+
+  const t0 = performance.now()
+  let seen = false
+  while (!autoAbort && performance.now() - t0 < CARD_WAIT_MS) {
+    const ratio = sampleRedRatio()
+    if (ratio !== null && ratio >= need) {
+      hostLog(`一键拼图：看到红卡纸了（红色 ${pct(ratio)}），挪开就开始`)
+      seen = true
+      break
+    }
+    await sleep(CARD_POLL_MS)
+  }
+  if (autoAbort) return false
+  if (!seen) {
+    // 没挥卡纸：别把人卡在这儿。说一声就照常往下走
+    hostLog(`一键拼图：等了 ${Math.round(CARD_WAIT_MS / 1000)} 秒没等到红卡纸，就当已经准备好了`)
+    return true
+  }
+
+  const t1 = performance.now()
+  while (!autoAbort && performance.now() - t1 < CARD_HOLD_MS) {
+    const ratio = sampleRedRatio()
+    if (ratio !== null && ratio < need) {
+      hostLog(`一键拼图：红卡纸挪开了（红色 ${pct(ratio)}），开始`)
+      return true
+    }
+    await sleep(CARD_POLL_MS)
+  }
+  if (!autoAbort) {
+    hostLog(`一键拼图：红卡纸一直挡着没挪开（超过 ${Math.round(CARD_HOLD_MS / 60000)} 分钟），先停在这儿`)
+  }
+  return false
+}
+
 /**
  * 机器**被命令**到达的位置（脉冲）。协议里的 posX/posY 就是命令寄存器，
  * 所以这里记下的就是机器那边的值——不必再去问。
@@ -481,6 +557,9 @@ async function autoAssemble() {
         hostLog('一键拼图：摄像头还没出画面，先点「开启摄像头」')
         return
       }
+      // 待机等红卡纸：**机器一动没动**之前先让人准备好
+      if (calibration.cardGate && !await redCardGate()) return
+      if (autoAbort) return
       if (!await calibrateAndRecognize()) return
       if (autoAbort) return
     }
@@ -634,7 +713,7 @@ const CAL_DEFAULTS = {
   invertX: false, invertY: false, boardW: 297, boardH: 210,
   calibYPulse: 32000, calibSettleMs: 4000,
   autoMoveMs: 4000, autoSpeedMmS: 60, autoCarryDwellMs: 1000, autoSettleMs: 800, actionStepMs: 700,
-  assemblyGapMm: 2, assemblyAnim: true,
+  assemblyGapMm: 2, assemblyAnim: true, cardGate: true, cardCoverPct: 20,
 }
 
 function fillCalibrationForm() {
@@ -653,6 +732,8 @@ function fillCalibrationForm() {
   hostEl.calSettleDwell.value = calibration.autoSettleMs
   hostEl.calGap.value = calibration.assemblyGapMm
   hostEl.calAnim.checked = calibration.assemblyAnim
+  hostEl.calCardGate.checked = calibration.cardGate
+  hostEl.calCardPct.value = calibration.cardCoverPct
   hostEl.calMoveWait.value = calibration.autoMoveMs
   hostEl.calActionStep.value = calibration.actionStepMs
 }
@@ -677,6 +758,8 @@ function applyCalibrationForm() {
   calibration.autoSettleMs = num(hostEl.calSettleDwell, calibration.autoSettleMs)
   calibration.assemblyGapMm = num(hostEl.calGap, calibration.assemblyGapMm)
   calibration.assemblyAnim = hostEl.calAnim.checked
+  calibration.cardGate = hostEl.calCardGate.checked
+  calibration.cardCoverPct = num(hostEl.calCardPct, calibration.cardCoverPct)
   calibration.autoMoveMs = num(hostEl.calMoveWait, calibration.autoMoveMs)
   calibration.actionStepMs = num(hostEl.calActionStep, calibration.actionStepMs)
   saveCalibration()
@@ -795,12 +878,13 @@ function wireHostConsole() {
   for (const input of [hostEl.calXMin, hostEl.calXMax, hostEl.calYMin, hostEl.calYMax,
     hostEl.calBW, hostEl.calBH, hostEl.calCalibY, hostEl.calCalibWait,
     hostEl.calCarryDwell, hostEl.calSettleDwell, hostEl.calMoveWait, hostEl.calActionStep,
-    hostEl.calSpeed,
+    hostEl.calSpeed, hostEl.calCardPct,
     hostEl.calGap]) {
     input.addEventListener('change', applyCalibrationForm)
   }
   hostEl.calInvX.addEventListener('change', applyCalibrationForm)
   hostEl.calInvY.addEventListener('change', applyCalibrationForm)
+  hostEl.calCardGate.addEventListener('change', applyCalibrationForm)
   // 关掉动画就当场把画面上的幻影擦掉，不用等下一次识别
   hostEl.calAnim.addEventListener('change', () => {
     applyCalibrationForm()
